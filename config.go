@@ -95,12 +95,14 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("loading %s: %w", path, err)
 	}
 
+	baseDir := filepath.Dir(path)
+
 	resolved := make([]ResolvedBridge, 0, len(main.Bridges))
 	for _, b := range main.Bridges {
+		b.Listen = resolvePath(baseDir, b.Listen)
 		resolved = append(resolved, ResolvedBridge{BridgeConfig: b, Source: "inline"})
 	}
 
-	baseDir := filepath.Dir(path)
 	includeFiles, err := expandIncludes(baseDir, main.Include)
 	if err != nil {
 		return nil, err
@@ -117,7 +119,9 @@ func LoadConfig(path string) (*Config, error) {
 		if err := rejectGlobalOptions(f, inc); err != nil {
 			return nil, err
 		}
+		incDir := filepath.Dir(f)
 		for _, b := range inc.Bridges {
+			b.Listen = resolvePath(incDir, b.Listen)
 			resolved = append(resolved, ResolvedBridge{BridgeConfig: b, Source: f})
 		}
 	}
@@ -152,7 +156,7 @@ func LoadConfig(path string) (*Config, error) {
 
 	return &Config{
 		Hostname:    hostname,
-		StateDir:    main.StateDir,
+		StateDir:    resolvePath(baseDir, main.StateDir),
 		Ephemeral:   ephemeral,
 		ControlURL:  main.ControlURL,
 		SocketGroup: main.SocketGroup,
@@ -191,6 +195,18 @@ func rejectGlobalOptions(file string, inc *rawConfig) error {
 		return fmt.Errorf("included file %s sets global option(s) %s, but included files may only set 'bridges'", file, strings.Join(set, ", "))
 	}
 	return nil
+}
+
+// resolvePath returns p unchanged if it's empty or already absolute;
+// otherwise it's resolved relative to baseDir, which is always the
+// directory of whichever config file p came from -- the main config's
+// directory for state_dir and inline bridges, or a specific included
+// file's own directory for a bridge defined there.
+func resolvePath(baseDir, p string) string {
+	if p == "" || filepath.IsAbs(p) {
+		return p
+	}
+	return filepath.Join(baseDir, p)
 }
 
 func readRawConfig(path string) (*rawConfig, error) {

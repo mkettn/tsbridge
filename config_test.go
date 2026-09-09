@@ -69,6 +69,57 @@ bridges:
 	}
 }
 
+func TestLoadConfig_RelativePathsResolveAgainstTheirOwnFile(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), `
+state_dir: state
+include: config.d/*.yml
+bridges:
+  - name: inline-svc
+    listen: inline.sock
+    target: h:1
+  - name: absolute-svc
+    listen: /run/tsbridge/absolute.sock
+    target: h:2
+`)
+	writeFile(t, filepath.Join(dir, "config.d", "a.yml"), `
+bridges:
+  - name: included-svc
+    listen: included.sock
+    target: h:3
+`)
+
+	cfg, err := LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	wantStateDir := filepath.Join(dir, "state")
+	if cfg.StateDir != wantStateDir {
+		t.Errorf("want state_dir %q, got %q", wantStateDir, cfg.StateDir)
+	}
+
+	byName := map[string]string{}
+	for _, b := range cfg.Bridges {
+		byName[b.Name] = b.Listen
+	}
+
+	// Relative listen: in the main config resolves against the main
+	// config's own directory.
+	if want := filepath.Join(dir, "inline.sock"); byName["inline-svc"] != want {
+		t.Errorf("inline-svc listen: want %q, got %q", want, byName["inline-svc"])
+	}
+	// An absolute listen: path is left untouched.
+	if byName["absolute-svc"] != "/run/tsbridge/absolute.sock" {
+		t.Errorf("absolute-svc listen: want unchanged, got %q", byName["absolute-svc"])
+	}
+	// Relative listen: in an included file resolves against THAT file's
+	// directory (config.d/), not the main config's directory.
+	if want := filepath.Join(dir, "config.d", "included.sock"); byName["included-svc"] != want {
+		t.Errorf("included-svc listen: want %q, got %q", want, byName["included-svc"])
+	}
+}
+
 func TestLoadConfig_EmptyGlobIsNotAnError(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), `

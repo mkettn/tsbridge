@@ -18,6 +18,9 @@ directly to `remote-machine:1234` on the tailnet.
 - `config.d/example-service.yml` — annotated example drop-in
 - `tsbridge.service` — systemd unit
 - `tsbridge-sysusers.conf` — `systemd-sysusers` snippet for the service user
+- [`example/`](example/) — self-contained runnable example: a `config.yaml`
+  bridging one tailnet HTTP service to a local socket, plus a `Caddyfile`
+  serving that socket on `localhost:1234`
 
 ## Building
 
@@ -33,6 +36,38 @@ go build -o tsbridge .
 `go vet ./...` and `go test ./...` are clean; the tests cover config
 loading, merging, and validation (duplicate detection, malformed YAML,
 nested-include rejection, etc.) without requiring network access.
+
+## Quick example
+
+[`example/`](example/) is a minimal, self-contained way to see `tsbridge`
+work without touching `/etc`, `/var`, or `/run`:
+
+```sh
+go build -o tsbridge .
+
+# Edit example/config.yaml's `target:` first -- it ships pointed at a
+# placeholder "example-host:80"; replace that with a real host:port on
+# your tailnet serving plain HTTP.
+
+TS_AUTHKEY=tskey-auth-xxxxx ./tsbridge -config example/config.yaml
+```
+
+`state_dir` and the bridge's `listen` socket in `example/config.yaml` are
+relative paths, so tsbridge creates `example/state/` and
+`example/tsbridge-example.sock` right there instead of under a system
+directory (see [Relative paths](#relative-paths) below) — nothing to
+create by hand first. Once it's running and has created the socket, serve
+it over plain HTTP locally with [Caddy](https://caddyserver.com/):
+
+```sh
+cd example && caddy run
+curl http://localhost:1234/
+```
+
+`example/Caddyfile` reverse-proxies `localhost:1234` straight to the Unix
+socket tsbridge created. This is the same shape as the
+[manual end-to-end test](#manual-end-to-end-test) below, just wired to a
+real tailnet target instead of a throwaway echo listener.
 
 ## Registering the bridge node
 
@@ -133,6 +168,19 @@ Each bridge entry:
   listen: /run/tsbridge/my-service.sock   # Unix socket path to create
   target: remote-machine:1234             # host:port reachable over the tailnet
 ```
+
+### Relative paths
+
+`state_dir` and each bridge's `listen` accept relative paths, not just
+absolute ones. A relative path is resolved against the directory of
+*whichever config file it's written in*: `state_dir` and an inline
+`listen:` resolve against the main config file's directory, while a
+`listen:` inside a `config.d/` (or any other included) file resolves
+against that included file's own directory instead. This is mostly
+useful for self-contained setups (see [`example/`](example/) below) —
+for a real install, prefer absolute paths so they don't depend on the
+config file's location matching `RuntimeDirectory=`/`StateDirectory=`
+by coincidence.
 
 ### `include` and `config.d/`
 

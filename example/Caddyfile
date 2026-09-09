@@ -1,0 +1,14 @@
+# Serves the tsbridge Unix socket from config.yaml (in this same
+# directory) on http://localhost:1234.
+#
+# Run from inside this directory so the relative socket path below
+# resolves against it, matching config.yaml's `listen:`:
+#
+#   caddy run
+#
+# tsbridge (pointed at config.yaml here) needs to be running first so
+# the socket exists -- Caddy will otherwise return a 502 until it does.
+
+localhost:1234 {
+	reverse_proxy unix/tsbridge-example.sock
+}
