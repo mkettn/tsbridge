@@ -17,6 +17,9 @@ coverage.*
 *.coverprofile
 profile.cov
 
+# Built binary
+/tsbridge
+
 # Dependency directories (remove the comment below to include it)
 # vendor/
 

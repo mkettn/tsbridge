@@ -1,0 +1,53 @@
+[Unit]
+Description=tsbridge - Tailscale-to-Unix-socket bridge (tsnet, userspace)
+Documentation=https://github.com/mkettn/tsbridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tsbridge
+Group=tsbridge
+
+ExecStart=/usr/local/bin/tsbridge -config /etc/tsbridge/config.yaml
+Restart=on-failure
+RestartSec=5s
+
+# TS_AUTHKEY (and, for a persistent node, nothing else secret) lives here.
+# Create this file with `chmod 0600` and `chown tsbridge:tsbridge` -- never
+# commit it, and never put the key in config.yaml.
+EnvironmentFile=/etc/tsbridge/tsbridge.env
+
+# /run/tsbridge, owned by tsbridge:tsbridge, created before ExecStart runs.
+# Bridge sockets are created here (see config.example.yaml `listen:` paths).
+RuntimeDirectory=tsbridge
+RuntimeDirectoryMode=0750
+
+# /var/lib/tsbridge, owned by tsbridge:tsbridge, for tsnet's persistent
+# node state (only needed when running with `ephemeral: false`).
+StateDirectory=tsbridge
+StateDirectoryMode=0700
+
+# /etc/tsbridge, covering config.yaml and config.d/*.yml. Not writable by
+# the service (see ProtectSystem=strict + ReadWritePaths below).
+ConfigurationDirectory=tsbridge
+
+# --- Hardening -------------------------------------------------------
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+# tsnet needs outbound UDP/TCP to reach Tailscale's coordination and relay
+# servers, so no AF_UNIX/AF_INET restriction beyond the defaults here.
+ReadWritePaths=/run/tsbridge /var/lib/tsbridge
+
+[Install]
+WantedBy=multi-user.target
