@@ -30,7 +30,7 @@ bridges:
   - name: svc-a
     listen: /run/tsbridge/svc-a.sock
     target: host-a:1111
-    type: TCP
+    mode: TCP
   - name: svc-b
     listen: /run/tsbridge/svc-b.sock
     target: host-b:2222
@@ -58,29 +58,29 @@ bridges:
 	if byName["svc-a"].Target != "host-a:1111" {
 		t.Errorf("svc-a not resolved correctly: %+v", byName["svc-a"])
 	}
-	if byName["svc-a"].Type != "tcp" {
-		t.Errorf("svc-a type: want lowercased %q, got %q", "tcp", byName["svc-a"].Type)
+	if byName["svc-a"].Mode != "tcp" {
+		t.Errorf("svc-a mode: want lowercased %q, got %q", "tcp", byName["svc-a"].Mode)
 	}
 	if byName["svc-b"].Target != "host-b:2222" {
 		t.Errorf("svc-b not resolved correctly: %+v", byName["svc-b"])
 	}
-	if byName["svc-b"].Type != "tcp" {
-		t.Errorf("svc-b type: want default %q, got %q", "tcp", byName["svc-b"].Type)
+	if byName["svc-b"].Mode != "tcp" {
+		t.Errorf("svc-b mode: want default %q, got %q", "tcp", byName["svc-b"].Mode)
 	}
 }
 
-func TestLoadConfig_UnsupportedBridgeTypeRejected(t *testing.T) {
+func TestLoadConfig_UnsupportedBridgeModeRejected(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), `
 bridges:
   - name: svc
     listen: /run/svc.sock
     target: h:1
-    type: udp
+    mode: http
 `)
 	_, err := LoadConfig(filepath.Join(dir, "config.yaml"))
-	if err == nil || !strings.Contains(err.Error(), `unsupported type "udp"`) {
-		t.Fatalf("want error naming unsupported type, got: %v", err)
+	if err == nil || !strings.Contains(err.Error(), `unsupported mode "http"`) {
+		t.Fatalf("want error naming unsupported mode, got: %v", err)
 	}
 }
 

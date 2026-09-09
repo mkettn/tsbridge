@@ -179,7 +179,7 @@ Each bridge entry:
 - name: my-service          # unique identifier, used in logs and error messages
   listen: /run/tsbridge/my-service.sock   # Unix socket path to create
   target: remote-machine:1234             # host:port reachable over the tailnet
-  type: tcp                 # optional, defaults to "tcp" -- the only supported value right now
+  mode: tcp                 # optional, defaults to "tcp" -- the only supported value right now
 ```
 
 `bridges:` is a flat list — every service `tsbridge` proxies is one entry
@@ -189,15 +189,17 @@ naming the conflict. Adding, removing, or changing a bridge means editing
 `config.yaml` and restarting `tsbridge` — there is no hot-reload (see
 [Non-goals](#non-goals)).
 
-`type` is the network tsbridge dials on the tailnet side. `"tcp"` (the
-default if omitted) is the only value currently accepted — anything else
-is a fatal startup error naming the bridge and the rejected value. This
-doesn't restrict what protocol rides *inside* the TCP connection (HTTP,
-TLS, gRPC, a custom binary protocol all work identically, since tsbridge
-just copies bytes — see the [Non-goals](#non-goals) note on protocol
-awareness); `type` exists so a future UDP-based bridge has somewhere to
-be declared without a breaking config change, not to pick an application
-protocol.
+`mode` selects what tsbridge *does* with the connection, not what network
+it dials — the tailnet-side dial is always TCP no matter what `mode` is.
+`"tcp"` (the default if omitted) is the only value currently accepted —
+anything else is a fatal startup error naming the bridge and the rejected
+value. In `tcp` mode tsbridge doesn't restrict what protocol rides
+*inside* the connection (HTTP, TLS, gRPC, a custom binary protocol all
+work identically, since it just copies bytes — see the
+[Non-goals](#non-goals) note on protocol awareness); `mode` exists so a
+future mode that *does* need protocol awareness (terminating and
+reverse-proxying HTTP, say, still dialing TCP underneath) has somewhere
+to be declared without a breaking config change.
 
 ### Relative paths
 

@@ -15,19 +15,22 @@ import (
 
 const defaultSocketMode os.FileMode = 0660
 
-// defaultBridgeType is used when a bridge doesn't set type:, and is
+// defaultBridgeMode is used when a bridge doesn't set mode:, and is
 // currently the only value checkBridges accepts.
-const defaultBridgeType = "tcp"
+const defaultBridgeMode = "tcp"
 
 // BridgeConfig is one listen-socket -> tailnet-target mapping.
 type BridgeConfig struct {
 	Name   string `yaml:"name"`
 	Listen string `yaml:"listen"`
 	Target string `yaml:"target"`
-	// Type is the network tsbridge dials on the tailnet side (passed
-	// straight through to tsnet.Server.Dial's network argument). "tcp"
-	// is the only supported value for now; unset defaults to it.
-	Type string `yaml:"type"`
+	// Mode selects how tsbridge handles the connection -- "tcp" (the
+	// only supported value for now; unset defaults to it) means the
+	// existing raw bidirectional byte copy. This is independent of the
+	// network tsbridge dials on the tailnet side, which is always TCP
+	// regardless of Mode: a future e.g. "http" mode would still dial
+	// TCP, just terminate and reverse-proxy instead of copying bytes.
+	Mode string `yaml:"mode"`
 }
 
 // Config is the fully resolved, validated configuration used at runtime.
@@ -64,9 +67,9 @@ func LoadConfig(path string) (*Config, error) {
 	bridges := raw.Bridges
 	for i := range bridges {
 		bridges[i].Listen = resolvePath(baseDir, bridges[i].Listen)
-		bridges[i].Type = strings.ToLower(strings.TrimSpace(bridges[i].Type))
-		if bridges[i].Type == "" {
-			bridges[i].Type = defaultBridgeType
+		bridges[i].Mode = strings.ToLower(strings.TrimSpace(bridges[i].Mode))
+		if bridges[i].Mode == "" {
+			bridges[i].Mode = defaultBridgeMode
 		}
 	}
 
@@ -148,8 +151,8 @@ func checkBridges(bridges []BridgeConfig) error {
 		if b.Target == "" {
 			return fmt.Errorf("bridge %q is missing required field 'target'", b.Name)
 		}
-		if b.Type != defaultBridgeType {
-			return fmt.Errorf("bridge %q has unsupported type %q; only %q is currently supported", b.Name, b.Type, defaultBridgeType)
+		if b.Mode != defaultBridgeMode {
+			return fmt.Errorf("bridge %q has unsupported mode %q; only %q is currently supported", b.Name, b.Mode, defaultBridgeMode)
 		}
 		if names[b.Name] {
 			return fmt.Errorf("duplicate bridge name %q", b.Name)

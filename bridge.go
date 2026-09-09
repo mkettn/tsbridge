@@ -184,7 +184,10 @@ func handleConn(ctx context.Context, srv *tsnet.Server, b BridgeConfig, local ne
 	defer local.Close()
 	id := atomic.AddUint64(&connCounter, 1)
 
-	remote, err := srv.Dial(ctx, b.Type, b.Target)
+	// The tailnet-side network is always TCP regardless of b.Mode --
+	// Mode selects what tsbridge does with the bytes once connected
+	// (currently only the raw copy below), not the transport.
+	remote, err := srv.Dial(ctx, "tcp", b.Target)
 	if err != nil {
 		log.Printf("bridge %s: conn %d: dial %s failed: %v", b.Name, id, b.Target, err)
 		return

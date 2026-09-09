@@ -20,6 +20,11 @@ profile.cov
 # Built binary
 /tsbridge
 
+# Artifacts from running example/ -- notably example/state/, which holds
+# the example node's private key material once tsbridge has run there.
+/example/state/
+*.sock
+
 # Dependency directories (remove the comment below to include it)
 # vendor/
 
