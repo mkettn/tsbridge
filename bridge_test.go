@@ -354,3 +354,33 @@ func TestStartHTTPBridge_UnreachableTargetReturnsBadGateway(t *testing.T) {
 		t.Errorf("want 502, got %d", resp.StatusCode)
 	}
 }
+
+// TestStartHTTPBridge_ShutdownAlwaysUnlinksSocket guards against
+// http.Server.Shutdown returning nil (having closed nothing) when it
+// races the Serve goroutine's own startup: that path would silently
+// skip the Close() fallback too, since that only fires on error,
+// leaving the socket file behind after a "clean" shutdown. Immediately
+// shutting down right after startBridge returns -- as shutdown() does --
+// puts Shutdown right in that startup race, so repeating it reliably
+// exercises the window rather than winning it by chance.
+func TestStartHTTPBridge_ShutdownAlwaysUnlinksSocket(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		dir := t.TempDir()
+		sockPath := filepath.Join(dir, "race.sock")
+		ctx, cancel := context.WithCancel(context.Background())
+
+		b := BridgeConfig{Name: "race", Listen: sockPath, Target: "example.invalid:80", Mode: "http"}
+		fatal := make(chan error, 1)
+		rb, err := startBridge(ctx, failDial, b, 0660, "", fatal)
+		if err != nil {
+			cancel()
+			t.Fatalf("iteration %d: startBridge: %v", i, err)
+		}
+
+		shutdown(t, cancel, rb)
+
+		if _, err := os.Stat(sockPath); !os.IsNotExist(err) {
+			t.Fatalf("iteration %d: socket file still present after Shutdown, stat err = %v", i, err)
+		}
+	}
+}

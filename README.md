@@ -232,7 +232,10 @@ out of the way of whatever bytes cross the socket, so the client
 connecting to it can speak TLS straight through to the target itself),
 no path rewriting, header injection, auth, retries, or caching. It's a
 plain reverse proxy (Go's `httputil.ReverseProxy`) sitting in front of
-`target`, nothing more.
+`target`, nothing more. One more gap worth knowing before picking `http`
+for a given bridge: upgraded connections (WebSockets) don't get a
+shutdown drain window the way everything else does — see
+[Signal handling / shutdown](#signal-handling--shutdown).
 
 ### Relative paths
 
@@ -350,13 +353,25 @@ more.
 
 ## Signal handling / shutdown
 
-`tsbridge` handles `SIGTERM` and `SIGINT` by: closing every bridge's Unix
-socket listener (which unlinks the socket file), then waiting up to 10
-seconds for in-flight connection handlers to finish their current copy
-before exiting regardless (well inside systemd's default 90s
+`tsbridge` handles `SIGTERM` and `SIGINT` by stopping every bridge and
+unlinking its socket file, giving in-flight work up to 10 seconds to
+finish before exiting regardless (well inside systemd's default 90s
 `TimeoutStopSec`, so this normally finishes on its own rather than being
 cut off by a SIGKILL). Under systemd this is the normal
-`systemctl stop`/`restart` path.
+`systemctl stop`/`restart` path. What "in-flight work" covers differs
+slightly by `mode`:
+
+- **`tcp`**: an open connection's byte copy in both directions gets the
+  full drain window.
+- **`http`**: an in-progress request gets the same drain window. A
+  proxied connection that's been **upgraded** (WebSockets, most notably)
+  is a documented gap in Go's `net/http`: `http.Server.Shutdown` neither
+  waits for nor closes hijacked connections, so an upgraded connection is
+  dropped immediately at process exit with no grace period, unlike
+  everything else. If a bridge carries long-lived WebSocket traffic and
+  a clean drain on shutdown matters for it, use `mode: tcp` instead —
+  the raw byte copy has no notion of "upgraded" to lose track of, so it
+  drains like any other connection.
 
 To verify manually:
 

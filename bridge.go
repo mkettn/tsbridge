@@ -276,6 +276,7 @@ func closeWrite(c net.Conn) {
 // dialing out through dial rather than raw-copying bytes.
 type httpBridge struct {
 	srv *http.Server
+	l   net.Listener
 }
 
 func startHTTPBridge(ctx context.Context, dial dialFunc, b BridgeConfig, l net.Listener, fatal chan<- error) *httpBridge {
@@ -310,13 +311,25 @@ func startHTTPBridge(ctx context.Context, dial dialFunc, b BridgeConfig, l net.L
 		}
 	}()
 
-	return &httpBridge{srv: httpSrv}
+	return &httpBridge{srv: httpSrv, l: l}
 }
 
 // Shutdown stops accepting new connections and waits, bounded by ctx,
 // for in-flight requests to finish; if ctx runs out first, it force-closes
 // whatever's left rather than leaving it to linger past shutdown.
+//
+// It closes l itself rather than relying solely on http.Server.Shutdown
+// to do it: Shutdown only closes listeners Serve has already registered
+// (via trackListener), so a Shutdown call racing the Serve goroutine's
+// own startup can find nothing tracked yet and return nil having closed
+// nothing -- which would also skip the Close() fallback below, since
+// that only fires on a non-nil error. Closing l unconditionally here
+// means the socket file is unlinked regardless of that race; Serve
+// wraps l in a once-close wrapper and net.UnixListener.Close is safe to
+// call twice, so closing it again from Serve's own deferred cleanup is
+// harmless.
 func (h *httpBridge) Shutdown(ctx context.Context) {
+	defer h.l.Close()
 	if err := h.srv.Shutdown(ctx); err != nil {
 		h.srv.Close()
 	}
