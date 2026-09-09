@@ -18,10 +18,21 @@ RestartSec=5s
 # commit it, and never put the key in config.yaml.
 EnvironmentFile=/etc/tsbridge/tsbridge.env
 
+# Group(s) tsbridge must belong to in order to chown a bridge socket to
+# its configured socket_group (config.example.yaml ships "www-data" as
+# the example). Add every socket_group used by any bridge here --
+# whether it's added inline or via a config.d/ drop-in, this is a unit
+# file edit either way, since group membership is a process-level grant
+# that config alone can't extend.
+SupplementaryGroups=www-data
+
 # /run/tsbridge, owned by tsbridge:tsbridge, created before ExecStart runs.
 # Bridge sockets are created here (see config.example.yaml `listen:` paths).
+# Mode 0755 so client processes in a bridge's socket_group can traverse
+# into the directory at all -- access control happens at the socket
+# itself (its own group + socket_mode), not at the directory.
 RuntimeDirectory=tsbridge
-RuntimeDirectoryMode=0750
+RuntimeDirectoryMode=0755
 
 # /var/lib/tsbridge, owned by tsbridge:tsbridge, for tsnet's persistent
 # node state (only needed when running with `ephemeral: false`).

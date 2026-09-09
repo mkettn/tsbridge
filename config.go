@@ -111,6 +111,9 @@ func LoadConfig(path string) (*Config, error) {
 		if len(inc.Include) > 0 {
 			return nil, fmt.Errorf("included file %s sets 'include', but included files cannot themselves include other files", f)
 		}
+		if err := rejectGlobalOptions(f, inc); err != nil {
+			return nil, err
+		}
 		for _, b := range inc.Bridges {
 			resolved = append(resolved, ResolvedBridge{BridgeConfig: b, Source: f})
 		}
@@ -148,6 +151,35 @@ func LoadConfig(path string) (*Config, error) {
 	}, nil
 }
 
+// rejectGlobalOptions errors out if an included file sets any top-level
+// option other than bridges: an included file that sets, say,
+// socket_mode has that value silently dropped (only Bridges is ever
+// consumed from it), which for a value like socket_mode is a silent
+// permission downgrade relative to what the operator wrote. Failing
+// fast here is the same class of guard as the nested-include check.
+func rejectGlobalOptions(file string, inc *rawConfig) error {
+	var set []string
+	if inc.Hostname != "" {
+		set = append(set, "hostname")
+	}
+	if inc.StateDir != "" {
+		set = append(set, "state_dir")
+	}
+	if inc.Ephemeral != nil {
+		set = append(set, "ephemeral")
+	}
+	if inc.SocketGroup != "" {
+		set = append(set, "socket_group")
+	}
+	if inc.SocketMode != "" {
+		set = append(set, "socket_mode")
+	}
+	if len(set) > 0 {
+		return fmt.Errorf("included file %s sets global option(s) %s, but included files may only set 'bridges'", file, strings.Join(set, ", "))
+	}
+	return nil
+}
+
 func readRawConfig(path string) (*rawConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -164,10 +196,12 @@ func readRawConfig(path string) (*rawConfig, error) {
 
 // expandIncludes resolves each include glob (relative globs are resolved
 // against the main config file's directory) and returns the matched files
-// in sorted order, globs concatenated in the order given. A glob matching
-// zero files is not an error.
+// in sorted order per glob, globs concatenated in the order given. A file
+// reachable through more than one glob (overlapping patterns) is only
+// loaded once. A glob matching zero files is not an error.
 func expandIncludes(baseDir string, patterns stringList) ([]string, error) {
 	var files []string
+	seen := map[string]bool{}
 	for _, pattern := range patterns {
 		resolved := pattern
 		if !filepath.IsAbs(resolved) {
@@ -178,7 +212,17 @@ func expandIncludes(baseDir string, patterns stringList) ([]string, error) {
 			return nil, fmt.Errorf("invalid include glob %q: %w", pattern, err)
 		}
 		sort.Strings(matches)
-		files = append(files, matches...)
+		for _, m := range matches {
+			abs, err := filepath.Abs(m)
+			if err != nil {
+				return nil, fmt.Errorf("resolving %s: %w", m, err)
+			}
+			if seen[abs] {
+				continue
+			}
+			seen[abs] = true
+			files = append(files, m)
+		}
 	}
 	return files, nil
 }

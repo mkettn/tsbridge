@@ -211,6 +211,44 @@ totally_unknown_field: true
 	}
 }
 
+func TestLoadConfig_IncludedFileGlobalOptionRejected(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), `
+include: config.d/*.yml
+bridges: []
+`)
+	writeFile(t, filepath.Join(dir, "config.d", "a.yml"), `
+socket_mode: "0600"
+bridges:
+  - {name: a, listen: /run/a.sock, target: h:1}
+`)
+	_, err := LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err == nil || !strings.Contains(err.Error(), "socket_mode") {
+		t.Fatalf("expected error naming socket_mode as a rejected global option, got: %v", err)
+	}
+}
+
+func TestLoadConfig_OverlappingGlobsDeduped(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), `
+include:
+  - config.d/*.yml
+  - config.d/dup-*.yml
+bridges: []
+`)
+	writeFile(t, filepath.Join(dir, "config.d", "dup-svc.yml"), `
+bridges:
+  - {name: dup-svc, listen: /run/dup-svc.sock, target: h:1}
+`)
+	cfg, err := LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v (overlapping globs should be deduped, not treated as a conflict)", err)
+	}
+	if len(cfg.Bridges) != 1 {
+		t.Fatalf("want 1 bridge (file matched by both globs counted once), got %d: %+v", len(cfg.Bridges), cfg.Bridges)
+	}
+}
+
 func TestLoadConfig_DefaultsWhenUnset(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), `

@@ -137,6 +137,14 @@ Prefer this when:
 Either way, `tsbridge` must be restarted to pick up the change — there is
 no hot-reload (see [Non-goals](#non-goals)).
 
+Note that a *new* `socket_group` value — one `tsbridge` isn't already a
+member of — needs a `tsbridge.service` edit (`SupplementaryGroups=`) and
+`systemctl daemon-reload`, whether the bridge using it is added inline or
+via `config.d/`. Group membership is a process-level grant that config
+alone can't extend; a drop-in file only gets you out of touching the main
+`config.yaml`, not out of touching the unit if it introduces a group the
+service doesn't already belong to.
+
 ## Install
 
 1. Build and install the binary:
@@ -232,9 +240,12 @@ entries, and nothing more.
 ## Signal handling / shutdown
 
 `tsbridge` handles `SIGTERM` and `SIGINT` by: closing every bridge's Unix
-socket listener (which unlinks the socket file), waiting for in-flight
-connection handlers to finish their current copy, and exiting. Under
-systemd this is the normal `systemctl stop`/`restart` path.
+socket listener (which unlinks the socket file), then waiting up to 10
+seconds for in-flight connection handlers to finish their current copy
+before exiting regardless (well inside systemd's default 90s
+`TimeoutStopSec`, so this normally finishes on its own rather than being
+cut off by a SIGKILL). Under systemd this is the normal
+`systemctl stop`/`restart` path.
 
 To verify manually:
 
@@ -314,6 +325,14 @@ to exercise `srv.Dial` without it.
 
    Each should echo the same bytes back. For an HTTP-shaped target instead
    of raw echo, `curl --unix-socket /tmp/tsbridge-test/run/echo-inline.sock http://localhost/` works the same way.
+
+   Do this step as the *client* user your real consumer (e.g. the reverse
+   proxy) will actually run as, not as root or the user that ran
+   `tsbridge` — `sudo -u www-data nc -U ...`, for instance. Permission and
+   group-traversal problems (wrong `socket_group`, the service account
+   missing from that group, `/run/tsbridge` not traversable) only show up
+   under a real unprivileged client; root can read/write any socket
+   regardless of its mode and so won't catch them.
 
 5. `Ctrl-C` the `tsbridge` process and confirm both `.sock` files under
    `/tmp/tsbridge-test/run/` are gone.

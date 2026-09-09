@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -15,10 +17,17 @@ func TestStartBridge_CreatesSocketWithModeAndRemovesStale(t *testing.T) {
 	dir := t.TempDir()
 	sockPath := filepath.Join(dir, "test.sock")
 
-	// A stale file (e.g. left behind by an unclean previous shutdown)
-	// should be removed rather than causing "address already in use".
-	if err := os.WriteFile(sockPath, []byte("stale"), 0644); err != nil {
+	// Leave a genuinely stale socket file on disk (nothing listening on
+	// it any more), the way an unclean previous shutdown would: bind,
+	// then close without the usual unlink-on-close.
+	stale, err := net.ListenUnix("unix", &net.UnixAddr{Name: sockPath, Net: "unix"})
+	if err != nil {
 		t.Fatal(err)
+	}
+	stale.SetUnlinkOnClose(false)
+	stale.Close()
+	if _, err := os.Stat(sockPath); err != nil {
+		t.Fatalf("test setup: stale socket file not present: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -30,8 +39,9 @@ func TestStartBridge_CreatesSocketWithModeAndRemovesStale(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
+	fatal := make(chan error, 1)
 	srv := &tsnet.Server{} // never Up(); fine as long as no connection is dialed
-	l, err := startBridge(ctx, srv, b, 0640, "", &wg)
+	l, err := startBridge(ctx, srv, b, 0640, "", &wg, fatal)
 	if err != nil {
 		t.Fatalf("startBridge: %v", err)
 	}
@@ -55,6 +65,63 @@ func TestStartBridge_CreatesSocketWithModeAndRemovesStale(t *testing.T) {
 	}
 }
 
+func TestStartBridge_RefusesToRemoveNonSocketFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "not-a-socket")
+	if err := os.WriteFile(path, []byte("do not delete me"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	b := ResolvedBridge{
+		BridgeConfig: BridgeConfig{Name: "test", Listen: path, Target: "example.invalid:1"},
+		Source:       "inline",
+	}
+	var wg sync.WaitGroup
+	fatal := make(chan error, 1)
+	srv := &tsnet.Server{}
+	_, err := startBridge(ctx, srv, b, 0660, "", &wg, fatal)
+	if err == nil || !strings.Contains(err.Error(), "not a socket") {
+		t.Fatalf("want 'not a socket' error, got: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("file was removed: %v", err)
+	}
+	if string(data) != "do not delete me" {
+		t.Fatalf("file contents changed: %q", data)
+	}
+}
+
+func TestStartBridge_RefusesToStealLiveSocket(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "live.sock")
+
+	live, err := net.Listen("unix", sockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer live.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	b := ResolvedBridge{
+		BridgeConfig: BridgeConfig{Name: "test", Listen: sockPath, Target: "example.invalid:1"},
+		Source:       "inline",
+	}
+	var wg sync.WaitGroup
+	fatal := make(chan error, 1)
+	srv := &tsnet.Server{}
+	_, err = startBridge(ctx, srv, b, 0660, "", &wg, fatal)
+	if err == nil || !strings.Contains(err.Error(), "in use by another instance") {
+		t.Fatalf("want 'in use by another instance' error, got: %v", err)
+	}
+}
+
 func TestStartBridge_ChownsToGroup(t *testing.T) {
 	if os.Getuid() != 0 {
 		t.Skip("chown to an arbitrary group requires root in this sandbox")
@@ -72,8 +139,9 @@ func TestStartBridge_ChownsToGroup(t *testing.T) {
 	}
 
 	var wg sync.WaitGroup
+	fatal := make(chan error, 1)
 	srv := &tsnet.Server{}
-	l, err := startBridge(ctx, srv, b, 0660, "root", &wg)
+	l, err := startBridge(ctx, srv, b, 0660, "root", &wg, fatal)
 	if err != nil {
 		t.Fatalf("startBridge: %v", err)
 	}
