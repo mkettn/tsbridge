@@ -1,0 +1,36 @@
+# Self-contained tsbridge example: bridges one HTTP service on your
+# tailnet to a local Unix socket, entirely inside this example/
+# directory -- no /etc, /var, or /run paths, no root required.
+#
+# Run from the repo root, after `go build -o tsbridge .`:
+#
+#   TS_AUTHKEY=tskey-auth-xxxxx ./tsbridge -config example/config.yaml
+#
+# (or `TS_AUTHKEY=... go run . -config example/config.yaml` without a
+# separate build step). See README.md's "Registering the bridge node"
+# section if you'd rather not set TS_AUTHKEY and approve the node
+# interactively instead.
+#
+# state_dir and the bridge's listen socket below are relative paths, so
+# they resolve against this file's own directory (example/) rather than
+# needing an absolute path -- see README.md's "Relative paths" section.
+# Caddyfile in this same directory serves the resulting socket on
+# localhost:1234.
+
+hostname: tsbridge-example
+
+# Relative -> example/state. This example uses ephemeral: true so
+# repeated runs don't each leave behind an abandoned persistent node on
+# your tailnet; a real deployment should default to ephemeral: false
+# (see README.md's "Ephemeral vs. persistent identity").
+state_dir: state
+ephemeral: true
+
+bridges:
+  - name: example-service
+    # Relative -> example/tsbridge-example.sock (matches Caddyfile).
+    listen: tsbridge-example.sock
+    # Replace with a real host:port on your tailnet -- any plain HTTP
+    # service works, since tsbridge just proxies raw TCP bytes and
+    # doesn't care what's inside them.
+    target: example-host:80

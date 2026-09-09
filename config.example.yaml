@@ -1,0 +1,56 @@
+# tsbridge config file.
+#
+# Install this at /etc/tsbridge/config.yaml and adjust the values below.
+# See README.md for the full field reference.
+
+# Hostname this node presents to the tailnet's control server. Shows up in
+# `tailscale status` / the admin console as this node's name.
+hostname: bridge-myserver
+
+# Directory tsnet uses to persist node identity (keys, machine state)
+# across restarts. Required unless ephemeral: true. Must be writable by
+# the user tsbridge runs as; the systemd unit maps this to
+# StateDirectory=tsbridge (/var/lib/tsbridge).
+state_dir: /var/lib/tsbridge
+
+# If true, this node registers as an ephemeral tailnet node and is
+# automatically removed from the tailnet on clean shutdown; state_dir is
+# not required to persist identity across restarts. If false (the
+# default), the node keeps a stable identity/IP in state_dir across
+# restarts -- prefer this if ACLs or other tailnet policy pin to this
+# node's hostname or IP.
+ephemeral: false
+
+# Coordination/control server this node registers with and joins its
+# tailnet through. Leave unset (or empty) to use Tailscale's own control
+# server -- the normal case. Set this to run against a self-hosted
+# Headscale instance instead; tsbridge handles registering with it the
+# same way it would with Tailscale (see README's "Self-hosted control
+# servers" section), so pointing tsbridge here is the only step, no
+# separate registration procedure needed.
+# control_url: https://headscale.example.com
+
+# Unix group that should own each bridge socket, so other local
+# processes (e.g. a reverse proxy running as a different user) can
+# connect. The tsbridge service user must be a member of this group
+# (see tsbridge.service's SupplementaryGroups=, commented out by default
+# since "www-data" may not exist on every system -- uncomment both once
+# you've picked a real group for your setup).
+# socket_group: www-data
+
+# Permission bits applied to every bridge socket. Defaults to "0660" if
+# omitted.
+socket_mode: "0660"
+
+# All bridges this instance serves. Each maps a local Unix socket to a
+# host:port reachable over the tailnet. `mode` is optional and defaults
+# to "tcp" -- the only value currently supported -- so it's normally
+# left out; shown once below just to name it.
+bridges:
+  - name: my-service
+    listen: /run/tsbridge/my-service.sock
+    target: remote-machine:1234
+    mode: tcp
+  - name: other-service
+    listen: /run/tsbridge/other-service.sock
+    target: other-machine:5678

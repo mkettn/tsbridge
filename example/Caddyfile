@@ -1,0 +1,23 @@
+# Serves the tsbridge Unix socket from config.yaml (in this same
+# directory) on http://localhost:1234.
+#
+# Run from inside this directory so the relative socket path below
+# resolves against it, matching config.yaml's `listen:`:
+#
+#   caddy run
+#
+# tsbridge (pointed at config.yaml here) needs to be running first so
+# the socket exists -- Caddy will otherwise return a 502 until it does.
+#
+# The address below is explicitly "http://localhost:1234", not just
+# "localhost:1234": a bare hostname address makes Caddy enable automatic
+# HTTPS, and since "localhost" isn't a publicly issuable domain, Caddy
+# falls back to minting a cert from its own internal CA and asks to
+# install that CA into your system trust store (root password prompt
+# included) to avoid a browser warning. The explicit http:// scheme
+# turns automatic HTTPS off for this site entirely, so plain HTTP is
+# served with no certificate and no elevated privileges needed.
+
+http://localhost:1234 {
+	reverse_proxy unix/tsbridge-example.sock
+}
