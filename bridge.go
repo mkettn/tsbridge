@@ -107,7 +107,15 @@ var listenMu sync.Mutex
 // to the socket file it creates, so narrowing the umask for the
 // duration of the call closes the window where a freshly created socket
 // would otherwise sit at the default (e.g. 0755) until a later chmod.
-// syscall.Umask is process-global, hence the mutex.
+// syscall.Umask is process-global, hence the mutex -- which only
+// serializes our own calls here. By the time bridges start, srv.Up has
+// already returned and tsnet's background goroutines are running
+// without holding listenMu, so anything *they* create during this
+// narrow window inherits the tightened umask too. Umask only clears
+// bits, never sets them, so nothing can come out wider than intended;
+// the residual risk runs the other way (something coming out narrower,
+// e.g. losing an execute bit on a directory) and is very unlikely in
+// practice since the window is a single bind(2) call.
 func listenWithMode(path string, mode os.FileMode) (net.Listener, error) {
 	listenMu.Lock()
 	defer listenMu.Unlock()

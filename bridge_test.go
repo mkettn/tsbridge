@@ -9,6 +9,7 @@ import (
 	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"tailscale.com/tsnet"
 )
@@ -165,5 +166,98 @@ func TestStartBridge_ChownsToGroup(t *testing.T) {
 	}
 	if int(stat.Gid) != wantGID {
 		t.Errorf("want socket group %d, got %d", wantGID, stat.Gid)
+	}
+}
+
+func TestIsTemporaryAcceptError(t *testing.T) {
+	temp := &net.OpError{Op: "accept", Err: os.NewSyscallError("accept", syscall.EMFILE)}
+	if !isTemporaryAcceptError(temp) {
+		t.Error("EMFILE wrapped in *net.OpError should be temporary")
+	}
+	fatal := &net.OpError{Op: "accept", Err: os.NewSyscallError("accept", syscall.EINVAL)}
+	if isTemporaryAcceptError(fatal) {
+		t.Error("EINVAL should not be temporary")
+	}
+}
+
+// fakeListener replays a scripted sequence of Accept results, so
+// acceptLoop's retry/backoff/fatal decisions can be exercised without a
+// real socket or a real tsnet server.
+type fakeListener struct {
+	mu      sync.Mutex
+	results []error
+	idx     int
+	closed  bool
+}
+
+func (f *fakeListener) Accept() (net.Conn, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.idx >= len(f.results) {
+		select {} // scripted results exhausted; block rather than panic
+	}
+	err := f.results[f.idx]
+	f.idx++
+	return nil, err
+}
+
+func (f *fakeListener) Close() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.closed = true
+	return nil
+}
+
+func (f *fakeListener) Addr() net.Addr { return &net.UnixAddr{Name: "fake", Net: "unix"} }
+
+func (f *fakeListener) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.idx
+}
+
+func TestAcceptLoop_RetriesTemporaryThenReportsFatal(t *testing.T) {
+	l := &fakeListener{results: []error{
+		&net.OpError{Op: "accept", Err: os.NewSyscallError("accept", syscall.EMFILE)},
+		&net.OpError{Op: "accept", Err: os.NewSyscallError("accept", syscall.ENFILE)},
+		&net.OpError{Op: "accept", Err: os.NewSyscallError("accept", syscall.EINVAL)}, // not temporary -> fatal
+	}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	b := ResolvedBridge{
+		BridgeConfig: BridgeConfig{Name: "test-bridge", Listen: "/unused", Target: "example.invalid:1"},
+		Source:       "inline",
+	}
+	var wg sync.WaitGroup
+	fatal := make(chan error, 1)
+
+	done := make(chan struct{})
+	go func() {
+		acceptLoop(ctx, &tsnet.Server{}, b, l, &wg, fatal)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("acceptLoop did not return after a fatal error")
+	}
+
+	if got := l.callCount(); got != 3 {
+		t.Errorf("want 3 Accept calls (2 retried + 1 fatal), got %d", got)
+	}
+	if !l.closed {
+		t.Error("want listener closed on fatal error")
+	}
+
+	select {
+	case err := <-fatal:
+		if !strings.Contains(err.Error(), "test-bridge") {
+			t.Errorf("fatal error should name the bridge, got: %v", err)
+		}
+	default:
+		t.Error("want an error reported on the fatal channel")
 	}
 }

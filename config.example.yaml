@@ -23,8 +23,11 @@ ephemeral: false
 
 # Unix group that should own each bridge socket, so other local
 # processes (e.g. a reverse proxy running as a different user) can
-# connect. The tsbridge service user must be a member of this group.
-socket_group: www-data
+# connect. The tsbridge service user must be a member of this group
+# (see tsbridge.service's SupplementaryGroups=, commented out by default
+# since "www-data" may not exist on every system -- uncomment both once
+# you've picked a real group for your setup).
+# socket_group: www-data
 
 # Permission bits applied to every bridge socket. Defaults to "0660" if
 # omitted.

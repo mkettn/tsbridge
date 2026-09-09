@@ -19,12 +19,15 @@ RestartSec=5s
 EnvironmentFile=/etc/tsbridge/tsbridge.env
 
 # Group(s) tsbridge must belong to in order to chown a bridge socket to
-# its configured socket_group (config.example.yaml ships "www-data" as
-# the example). Add every socket_group used by any bridge here --
-# whether it's added inline or via a config.d/ drop-in, this is a unit
-# file edit either way, since group membership is a process-level grant
-# that config alone can't extend.
-SupplementaryGroups=www-data
+# its configured socket_group. Commented out by default so a fresh
+# install starts cleanly (an unresolvable group here fails the unit
+# outright at exec time, systemd status 216/GROUP -- "www-data" doesn't
+# exist on every distro, e.g. RHEL/Fedora use "apache"). Uncomment and
+# list every socket_group used by any bridge once you've picked one --
+# whether that bridge is added inline or via a config.d/ drop-in, this
+# is a unit file edit either way, since group membership is a
+# process-level grant that config alone can't extend.
+#SupplementaryGroups=www-data
 
 # /run/tsbridge, owned by tsbridge:tsbridge, created before ExecStart runs.
 # Bridge sockets are created here (see config.example.yaml `listen:` paths).
