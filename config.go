@@ -15,21 +15,25 @@ import (
 
 const defaultSocketMode os.FileMode = 0660
 
-// defaultBridgeMode is used when a bridge doesn't set mode:, and is
-// currently the only value checkBridges accepts.
+// defaultBridgeMode is used when a bridge doesn't set mode:.
 const defaultBridgeMode = "tcp"
+
+// supportedBridgeModes are the values checkBridges accepts for mode:.
+var supportedBridgeModes = map[string]bool{
+	"tcp":  true, // raw bidirectional byte copy
+	"http": true, // terminate HTTP and reverse-proxy to target
+}
 
 // BridgeConfig is one listen-socket -> tailnet-target mapping.
 type BridgeConfig struct {
 	Name   string `yaml:"name"`
 	Listen string `yaml:"listen"`
 	Target string `yaml:"target"`
-	// Mode selects how tsbridge handles the connection -- "tcp" (the
-	// only supported value for now; unset defaults to it) means the
-	// existing raw bidirectional byte copy. This is independent of the
-	// network tsbridge dials on the tailnet side, which is always TCP
-	// regardless of Mode: a future e.g. "http" mode would still dial
-	// TCP, just terminate and reverse-proxy instead of copying bytes.
+	// Mode selects how tsbridge handles the connection, not what network
+	// it dials on the tailnet side -- that's always TCP regardless of
+	// Mode. "tcp" (the default if unset) does a raw bidirectional byte
+	// copy; "http" terminates HTTP on the socket and reverse-proxies
+	// each request to Target instead.
 	Mode string `yaml:"mode"`
 }
 
@@ -151,8 +155,8 @@ func checkBridges(bridges []BridgeConfig) error {
 		if b.Target == "" {
 			return fmt.Errorf("bridge %q is missing required field 'target'", b.Name)
 		}
-		if b.Mode != defaultBridgeMode {
-			return fmt.Errorf("bridge %q has unsupported mode %q; only %q is currently supported", b.Name, b.Mode, defaultBridgeMode)
+		if !supportedBridgeModes[b.Mode] {
+			return fmt.Errorf("bridge %q has unsupported mode %q; supported modes are tcp, http", b.Name, b.Mode)
 		}
 		if names[b.Name] {
 			return fmt.Errorf("duplicate bridge name %q", b.Name)

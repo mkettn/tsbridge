@@ -179,7 +179,7 @@ Each bridge entry:
 - name: my-service          # unique identifier, used in logs and error messages
   listen: /run/tsbridge/my-service.sock   # Unix socket path to create
   target: remote-machine:1234             # host:port reachable over the tailnet
-  mode: tcp                 # optional, defaults to "tcp" -- the only supported value right now
+  mode: tcp                 # optional, defaults to "tcp" -- see "HTTP mode" below for the other option
 ```
 
 `bridges:` is a flat list — every service `tsbridge` proxies is one entry
@@ -191,15 +191,48 @@ naming the conflict. Adding, removing, or changing a bridge means editing
 
 `mode` selects what tsbridge *does* with the connection, not what network
 it dials — the tailnet-side dial is always TCP no matter what `mode` is.
-`"tcp"` (the default if omitted) is the only value currently accepted —
-anything else is a fatal startup error naming the bridge and the rejected
-value. In `tcp` mode tsbridge doesn't restrict what protocol rides
-*inside* the connection (HTTP, TLS, gRPC, a custom binary protocol all
-work identically, since it just copies bytes — see the
-[Non-goals](#non-goals) note on protocol awareness); `mode` exists so a
-future mode that *does* need protocol awareness (terminating and
-reverse-proxying HTTP, say, still dialing TCP underneath) has somewhere
-to be declared without a breaking config change.
+An unrecognized `mode` is a fatal startup error naming the bridge and the
+rejected value.
+
+- **`tcp`** (the default if `mode` is omitted): a raw bidirectional byte
+  copy, no protocol awareness at all — see the
+  [Non-goals](#non-goals) note. HTTP, TLS, gRPC, or anything else riding
+  over a TCP connection works identically, since tsbridge never looks at
+  the bytes.
+- **`http`**: tsbridge terminates HTTP on the Unix socket and
+  reverse-proxies each request to `target` as its own HTTP client,
+  instead of copying raw bytes. See [HTTP mode](#http-mode-reverse-proxy)
+  below for what that buys you over `tcp` and when to reach for it.
+
+### HTTP mode (reverse proxy)
+
+`mode: http` is for bridging an HTTP service specifically, as an
+alternative to `tcp` — not a requirement, since `tcp` already carries
+HTTP traffic fine (it's just bytes on a TCP connection either way). What
+`http` mode adds:
+
+- **Connection pooling to the target.** In `tcp` mode, every new
+  connection to the Unix socket opens a fresh `srv.Dial` to the tailnet
+  target. In `http` mode, tsbridge's `net/http` client reuses persistent
+  connections to `target` across requests (even across different client
+  connections to the socket), so a client that opens many short-lived
+  connections doesn't cost a fresh tailnet dial each time.
+- **Request-level logs.** Each proxied request logs method, path, target,
+  and either the response status or the error (e.g. `GET /some/path ->
+  remote-machine:1234: 200`, or `: dial tcp ...: connection refused` on
+  failure) — more useful for an HTTP-shaped service than the per-connection
+  open/close lines `tcp` mode logs.
+- **A real `502 Bad Gateway`** (rather than a client-visible connection
+  failure) when `target` is unreachable, since tsbridge is now the one
+  terminating the HTTP response.
+
+What it doesn't do: no TLS (`target` is always dialed as plain HTTP; for
+an HTTPS-only tailnet service, use `tcp` mode instead — tsbridge stays
+out of the way of whatever bytes cross the socket, so the client
+connecting to it can speak TLS straight through to the target itself),
+no path rewriting, header injection, auth, retries, or caching. It's a
+plain reverse proxy (Go's `httputil.ReverseProxy`) sitting in front of
+`target`, nothing more.
 
 ### Relative paths
 
@@ -450,6 +483,11 @@ failed` lines — that means the Unix socket side is fine but the tailnet
 target is unreachable (wrong `target:`, target service down, or an ACL
 blocking `tag:tsbridge` from reaching it).
 
+**`mode: http` bridge returns `502 Bad Gateway`**: same root cause as
+above (the socket side is fine, `target` isn't reachable) — check
+`journalctl -u tsbridge` for the request-level error line naming the
+bridge, method, path, and the underlying dial/HTTP error.
+
 **Diagnosing config errors**: `tsbridge` fails fast on any config problem
 and logs it to stderr/journal before exiting non-zero — a malformed
 `config.yaml`, a missing `name`/`listen`/`target` on a bridge, or a
@@ -463,6 +501,8 @@ path "..."`) rather than failing partway through startup.
   system network interface.
 - No hot-reload — config errors are always fail-fast at startup; restart
   `tsbridge` to pick up config changes.
-- No protocol awareness in the bridge itself — it copies raw TCP bytes in
-  both directions. Anything protocol-specific (HTTP, TLS termination,
-  etc.) belongs in whatever connects to the Unix socket, not here.
+- No protocol awareness in `tcp` mode (the default) — it copies raw TCP
+  bytes in both directions. `mode: http` is the one deliberate exception
+  (see [HTTP mode](#http-mode-reverse-proxy)); anything else
+  protocol-specific (TLS termination, gRPC, etc.) still belongs in
+  whatever connects to the Unix socket, not here.

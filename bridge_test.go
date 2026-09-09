@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,9 +13,24 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"tailscale.com/tsnet"
 )
+
+// failDial is a dialFunc for tests that never expect to actually dial
+// the tailnet target -- any call to it is a test bug.
+func failDial(ctx context.Context, network, address string) (net.Conn, error) {
+	return nil, fmt.Errorf("unexpected dial to %s %s", network, address)
+}
+
+// shutdown cancels ctx (the bridge's lifetime context, so acceptLoop/the
+// http server treat what follows as an intentional stop) and then calls
+// rb.Shutdown bounded by a short timeout, the same sequence main() uses.
+func shutdown(t *testing.T, cancel context.CancelFunc, rb runningBridge) {
+	t.Helper()
+	cancel()
+	ctx, done := context.WithTimeout(context.Background(), 5*time.Second)
+	defer done()
+	rb.Shutdown(ctx)
+}
 
 func TestStartBridge_CreatesSocketWithModeAndRemovesStale(t *testing.T) {
 	dir := t.TempDir()
@@ -36,10 +54,8 @@ func TestStartBridge_CreatesSocketWithModeAndRemovesStale(t *testing.T) {
 
 	b := BridgeConfig{Name: "test", Listen: sockPath, Target: "example.invalid:1", Mode: "tcp"}
 
-	var wg sync.WaitGroup
 	fatal := make(chan error, 1)
-	srv := &tsnet.Server{} // never Up(); fine as long as no connection is dialed
-	l, err := startBridge(ctx, srv, b, 0640, "", &wg, fatal)
+	rb, err := startBridge(ctx, failDial, b, 0640, "", fatal)
 	if err != nil {
 		t.Fatalf("startBridge: %v", err)
 	}
@@ -52,14 +68,10 @@ func TestStartBridge_CreatesSocketWithModeAndRemovesStale(t *testing.T) {
 		t.Errorf("want mode 0640, got %v", info.Mode().Perm())
 	}
 
-	cancel()
-	if err := l.Close(); err != nil {
-		t.Fatalf("close listener: %v", err)
-	}
-	wg.Wait()
+	shutdown(t, cancel, rb)
 
 	if _, err := os.Stat(sockPath); !os.IsNotExist(err) {
-		t.Errorf("want socket removed after Close, stat err = %v", err)
+		t.Errorf("want socket removed after Shutdown, stat err = %v", err)
 	}
 }
 
@@ -74,10 +86,8 @@ func TestStartBridge_RefusesToRemoveNonSocketFile(t *testing.T) {
 	defer cancel()
 
 	b := BridgeConfig{Name: "test", Listen: path, Target: "example.invalid:1", Mode: "tcp"}
-	var wg sync.WaitGroup
 	fatal := make(chan error, 1)
-	srv := &tsnet.Server{}
-	_, err := startBridge(ctx, srv, b, 0660, "", &wg, fatal)
+	_, err := startBridge(ctx, failDial, b, 0660, "", fatal)
 	if err == nil || !strings.Contains(err.Error(), "not a socket") {
 		t.Fatalf("want 'not a socket' error, got: %v", err)
 	}
@@ -105,10 +115,8 @@ func TestStartBridge_RefusesToStealLiveSocket(t *testing.T) {
 	defer cancel()
 
 	b := BridgeConfig{Name: "test", Listen: sockPath, Target: "example.invalid:1", Mode: "tcp"}
-	var wg sync.WaitGroup
 	fatal := make(chan error, 1)
-	srv := &tsnet.Server{}
-	_, err = startBridge(ctx, srv, b, 0660, "", &wg, fatal)
+	_, err = startBridge(ctx, failDial, b, 0660, "", fatal)
 	if err == nil || !strings.Contains(err.Error(), "in use by another instance") {
 		t.Fatalf("want 'in use by another instance' error, got: %v", err)
 	}
@@ -127,18 +135,12 @@ func TestStartBridge_ChownsToGroup(t *testing.T) {
 
 	b := BridgeConfig{Name: "test", Listen: sockPath, Target: "example.invalid:1", Mode: "tcp"}
 
-	var wg sync.WaitGroup
 	fatal := make(chan error, 1)
-	srv := &tsnet.Server{}
-	l, err := startBridge(ctx, srv, b, 0660, "root", &wg, fatal)
+	rb, err := startBridge(ctx, failDial, b, 0660, "root", fatal)
 	if err != nil {
 		t.Fatalf("startBridge: %v", err)
 	}
-	defer func() {
-		cancel()
-		l.Close()
-		wg.Wait()
-	}()
+	defer shutdown(t, cancel, rb)
 
 	info, err := os.Stat(sockPath)
 	if err != nil {
@@ -170,7 +172,7 @@ func TestIsTemporaryAcceptError(t *testing.T) {
 
 // fakeListener replays a scripted sequence of Accept results, so
 // acceptLoop's retry/backoff/fatal decisions can be exercised without a
-// real socket or a real tsnet server.
+// real socket.
 type fakeListener struct {
 	mu      sync.Mutex
 	results []error
@@ -220,7 +222,7 @@ func TestAcceptLoop_RetriesTemporaryThenReportsFatal(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		acceptLoop(ctx, &tsnet.Server{}, b, l, &wg, fatal)
+		acceptLoop(ctx, failDial, b, l, &wg, fatal)
 		close(done)
 	}()
 
@@ -244,5 +246,111 @@ func TestAcceptLoop_RetriesTemporaryThenReportsFatal(t *testing.T) {
 		}
 	default:
 		t.Error("want an error reported on the fatal channel")
+	}
+}
+
+// dialToAddr returns a dialFunc that ignores whatever address it's asked
+// to dial and always connects to backendAddr instead -- standing in for
+// tsnet.Server.Dial reaching a fixed tailnet target in tests.
+func dialToAddr(backendAddr string) dialFunc {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "tcp", backendAddr)
+	}
+}
+
+// unixHTTPClient returns an *http.Client that dials sockPath for every
+// request, regardless of the URL's host -- so plain "http://unix/..."
+// URLs reach the bridge's Unix socket.
+func unixHTTPClient(sockPath string) *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				var d net.Dialer
+				return d.DialContext(ctx, "unix", sockPath)
+			},
+		},
+	}
+}
+
+func TestStartHTTPBridge_ReverseProxiesToTarget(t *testing.T) {
+	backend, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backend.Close()
+	backendSrv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Backend", "yes")
+		fmt.Fprintf(w, "hello from %s", r.URL.Path)
+	})}
+	go backendSrv.Serve(backend)
+	defer backendSrv.Close()
+
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "http.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	b := BridgeConfig{Name: "http-test", Listen: sockPath, Target: "example.invalid:80", Mode: "http"}
+	fatal := make(chan error, 1)
+	rb, err := startBridge(ctx, dialToAddr(backend.Addr().String()), b, 0660, "", fatal)
+	if err != nil {
+		t.Fatalf("startBridge: %v", err)
+	}
+	defer shutdown(t, cancel, rb)
+
+	resp, err := unixHTTPClient(sockPath).Get("http://unix/some/path")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("want 200, got %d", resp.StatusCode)
+	}
+	if want := "hello from /some/path"; string(body) != want {
+		t.Errorf("want body %q, got %q", want, body)
+	}
+	if resp.Header.Get("X-Backend") != "yes" {
+		t.Errorf("missing backend response header, got: %v", resp.Header)
+	}
+
+	select {
+	case err := <-fatal:
+		t.Errorf("unexpected fatal error: %v", err)
+	default:
+	}
+}
+
+func TestStartHTTPBridge_UnreachableTargetReturnsBadGateway(t *testing.T) {
+	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return nil, fmt.Errorf("simulated dial failure")
+	}
+
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "http-fail.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	b := BridgeConfig{Name: "http-fail", Listen: sockPath, Target: "example.invalid:80", Mode: "http"}
+	fatal := make(chan error, 1)
+	rb, err := startBridge(ctx, dial, b, 0660, "", fatal)
+	if err != nil {
+		t.Fatalf("startBridge: %v", err)
+	}
+	defer shutdown(t, cancel, rb)
+
+	resp, err := unixHTTPClient(sockPath).Get("http://unix/")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("want 502, got %d", resp.StatusCode)
 	}
 }
