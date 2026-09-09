@@ -14,8 +14,7 @@ directly to `remote-machine:1234` on the tailnet.
 ## Contents
 
 - `main.go`, `config.go`, `bridge.go` — the `tsbridge` binary
-- `config.example.yaml` — annotated example main config
-- `config.d/example-service.yml` — annotated example drop-in
+- `config.example.yaml` — annotated example config
 - `tsbridge.service` — systemd unit
 - `tsbridge-sysusers.conf` — `systemd-sysusers` snippet for the service user
 - [`example/`](example/) — self-contained runnable example: a `config.yaml`
@@ -34,8 +33,8 @@ go build -o tsbridge .
 ```
 
 `go vet ./...` and `go test ./...` are clean; the tests cover config
-loading, merging, and validation (duplicate detection, malformed YAML,
-nested-include rejection, etc.) without requiring network access.
+loading and validation (duplicate detection, malformed YAML, missing
+fields, etc.) without requiring network access.
 
 ## Quick example
 
@@ -158,8 +157,7 @@ Top-level fields in `config.yaml`:
 | `control_url`  | (Tailscale)      | Control server to register with; set for a self-hosted Headscale        |
 | `socket_group` | (unset)          | Unix group to own every bridge socket                                   |
 | `socket_mode`  | `"0660"`         | Permission bits applied to every bridge socket                          |
-| `include`      | (unset)          | Glob, or list of globs, of additional files to merge in                 |
-| `bridges`      | `[]`             | Inline list of `{name, listen, target}` bridge mappings                 |
+| `bridges`      | `[]`             | List of `{name, listen, target}` bridge mappings                        |
 
 Each bridge entry:
 
@@ -169,75 +167,21 @@ Each bridge entry:
   target: remote-machine:1234             # host:port reachable over the tailnet
 ```
 
+`bridges:` is a flat list — every service `tsbridge` proxies is one entry
+here, in the one `config.yaml` file. `name` and `listen` must each be
+unique across the list; a duplicate of either is a fatal startup error
+naming the conflict. Adding, removing, or changing a bridge means editing
+`config.yaml` and restarting `tsbridge` — there is no hot-reload (see
+[Non-goals](#non-goals)).
+
 ### Relative paths
 
 `state_dir` and each bridge's `listen` accept relative paths, not just
-absolute ones. A relative path is resolved against the directory of
-*whichever config file it's written in*: `state_dir` and an inline
-`listen:` resolve against the main config file's directory, while a
-`listen:` inside a `config.d/` (or any other included) file resolves
-against that included file's own directory instead. This is mostly
-useful for self-contained setups (see [`example/`](example/) below) —
-for a real install, prefer absolute paths so they don't depend on the
-config file's location matching `RuntimeDirectory=`/`StateDirectory=`
-by coincidence.
-
-### `include` and `config.d/`
-
-`include` merges in extra files that each contain their own `bridges:`
-list, using the same schema as inline entries:
-
-```yaml
-include: /etc/tsbridge/config.d/*.yml
-# or:
-include:
-  - /etc/tsbridge/config.d/*.yml
-  - /etc/tsbridge/config.d/extra/*.yml
-```
-
-Rules, enforced at startup:
-
-- Files are loaded in **sorted filename order**, globs processed in the
-  order listed.
-- A glob matching **zero files** is fine (e.g. an empty `config.d/` on
-  first install).
-- An included file that fails to parse is a **fatal startup error** — the
-  log names the file and the parse error, and `tsbridge` exits non-zero.
-  It does not silently skip bad files.
-- An included file may **not** itself set `include` — only one level of
-  nesting is supported. `tsbridge` rejects this at startup with an error
-  naming the offending file.
-- A duplicate `name` or `listen` path — whether both copies are inline,
-  both in included files, or split across inline and included — is a
-  fatal startup error naming both conflicting sources.
-
-### Two ways to add a bridged service
-
-**a. Edit the main config directly** — add an entry to `bridges:` in
-`config.yaml`. Straightforward for a small, mostly-static set of bridges
-that one person or team maintains by hand.
-
-**b. Drop a file into `config.d/`** — create
-`/etc/tsbridge/config.d/new-service.yml` with its own `bridges:` list.
-Prefer this when:
-- a config management tool (Ansible, Puppet, etc.) or a per-service
-  installer script owns one bridge definition and shouldn't need to
-  parse/edit the shared main config,
-- different teams or packages each want to own their own bridge file
-  without merge conflicts,
-- you want to add/remove a bridge by adding/removing a single file rather
-  than editing YAML in place.
-
-Either way, `tsbridge` must be restarted to pick up the change — there is
-no hot-reload (see [Non-goals](#non-goals)).
-
-Note that a *new* `socket_group` value — one `tsbridge` isn't already a
-member of — needs a `tsbridge.service` edit (`SupplementaryGroups=`) and
-`systemctl daemon-reload`, whether the bridge using it is added inline or
-via `config.d/`. Group membership is a process-level grant that config
-alone can't extend; a drop-in file only gets you out of touching the main
-`config.yaml`, not out of touching the unit if it introduces a group the
-service doesn't already belong to.
+absolute ones. A relative path is resolved against `config.yaml`'s own
+directory. This is mostly useful for self-contained setups (see
+[`example/`](example/)) — for a real install, prefer absolute paths so
+they don't depend on the config file's location matching
+`RuntimeDirectory=`/`StateDirectory=` by coincidence.
 
 ## Install
 
@@ -266,9 +210,8 @@ service doesn't already belong to.
 3. Install the config:
 
    ```sh
-   sudo mkdir -p /etc/tsbridge/config.d
+   sudo mkdir -p /etc/tsbridge
    sudo install -m 0644 config.example.yaml /etc/tsbridge/config.yaml
-   sudo install -m 0644 config.d/example-service.yml /etc/tsbridge/config.d/  # optional example
    sudo vi /etc/tsbridge/config.yaml    # edit hostname/bridges for your setup
    ```
 
@@ -306,6 +249,13 @@ yourself, and the Go program doesn't attempt to create them either (only
 the leaf socket files inside `/run/tsbridge`, which must already exist as
 a directory).
 
+To add, remove, or change a bridge later: edit `/etc/tsbridge/config.yaml`
+and `sudo systemctl restart tsbridge`. A *new* `socket_group` value — one
+`tsbridge` isn't already a member of — additionally needs a
+`tsbridge.service` edit (`SupplementaryGroups=`) and
+`systemctl daemon-reload`, since group membership is a process-level
+grant that `config.yaml` alone can't extend.
+
 ## Suggested tailnet ACL snippet
 
 Restrict the bridge node (tagged `tag:tsbridge` when you generated its
@@ -335,8 +285,8 @@ definitions and destinations for your setup:
 }
 ```
 
-Adjust `dst` to match every `target:` in your `bridges:`/`config.d/`
-entries, and nothing more.
+Adjust `dst` to match every `target:` in your `bridges:` list, and nothing
+more.
 
 ## Signal handling / shutdown
 
@@ -386,24 +336,16 @@ to exercise `srv.Dial` without it.
 
    Note that machine's tailnet hostname (e.g. `echo-host`).
 
-2. Set up a test config with one inline bridge and one `config.d/` bridge,
-   both pointed at the echo listener:
+2. Set up a test config pointed at the echo listener:
 
    ```sh
-   mkdir -p /tmp/tsbridge-test/config.d /tmp/tsbridge-test/run
+   mkdir -p /tmp/tsbridge-test/run
    cat > /tmp/tsbridge-test/config.yaml <<'EOF'
    hostname: tsbridge-manual-test
    ephemeral: true
-   include: /tmp/tsbridge-test/config.d/*.yml
    bridges:
-     - name: echo-inline
-       listen: /tmp/tsbridge-test/run/echo-inline.sock
-       target: echo-host:9999
-   EOF
-   cat > /tmp/tsbridge-test/config.d/echo-dropin.yml <<'EOF'
-   bridges:
-     - name: echo-dropin
-       listen: /tmp/tsbridge-test/run/echo-dropin.sock
+     - name: echo-test
+       listen: /tmp/tsbridge-test/run/echo-test.sock
        target: echo-host:9999
    EOF
    ```
@@ -414,18 +356,16 @@ to exercise `srv.Dial` without it.
    TS_AUTHKEY=tskey-auth-xxxxx ./tsbridge -config /tmp/tsbridge-test/config.yaml
    ```
 
-   Confirm the startup log lists both bridges, one marked `[inline]` and
-   one marked with the `config.d` file path.
+   Confirm the startup log lists the bridge.
 
-4. From another terminal, round-trip data through both sockets:
+4. Round-trip data through the socket:
 
    ```sh
-   echo -n "hello via inline" | nc -U /tmp/tsbridge-test/run/echo-inline.sock
-   echo -n "hello via dropin" | nc -U /tmp/tsbridge-test/run/echo-dropin.sock
+   echo -n "hello" | nc -U /tmp/tsbridge-test/run/echo-test.sock
    ```
 
-   Each should echo the same bytes back. For an HTTP-shaped target instead
-   of raw echo, `curl --unix-socket /tmp/tsbridge-test/run/echo-inline.sock http://localhost/` works the same way.
+   It should echo the same bytes back. For an HTTP-shaped target instead
+   of raw echo, `curl --unix-socket /tmp/tsbridge-test/run/echo-test.sock http://localhost/` works the same way.
 
    Do this step as the *client* user your real consumer (e.g. the reverse
    proxy) will actually run as, not as root or the user that ran
@@ -435,8 +375,8 @@ to exercise `srv.Dial` without it.
    under a real unprivileged client; root can read/write any socket
    regardless of its mode and so won't catch them.
 
-5. `Ctrl-C` the `tsbridge` process and confirm both `.sock` files under
-   `/tmp/tsbridge-test/run/` are gone.
+5. `Ctrl-C` the `tsbridge` process and confirm
+   `/tmp/tsbridge-test/run/echo-test.sock` is gone.
 
 ## Troubleshooting
 
@@ -468,8 +408,7 @@ journalctl -u tsbridge --since -10m
 ```
 
 Startup logs include the fully resolved bridge list (name, listen path,
-target, and source file) — check that first if a bridge you expect isn't
-there.
+target) — check that first if a bridge you expect isn't there.
 
 **Verifying a client can reach the socket**:
 
@@ -484,30 +423,19 @@ failed` lines — that means the Unix socket side is fine but the tailnet
 target is unreachable (wrong `target:`, target service down, or an ACL
 blocking `tag:tsbridge` from reaching it).
 
-**Diagnosing include-glob / config-merge errors**: `tsbridge` fails fast
-on any config problem and logs it to stderr/journal before exiting
-non-zero. Common messages and what they mean:
-
-- `loading included file .../foo.yml: parsing YAML: ...` — malformed YAML
-  in that specific file; the error includes the underlying YAML parser
-  message and line.
-- `included file .../foo.yml sets 'include', but included files cannot
-  themselves include other files` — remove the `include:` key from that
-  drop-in file; only the main config may use `include`.
-- `duplicate bridge name "x": defined in both inline and .../foo.yml` (or
-  `duplicate listen path "..."`) — two bridge entries collide; rename or
-  remove one. The message names both sources so you don't have to search.
-
-An `include` glob that matches nothing is *not* an error — if you expected
-files to be picked up and they weren't, check the glob pattern and that
-the files actually end in `.yml` (or whatever extension your glob uses).
+**Diagnosing config errors**: `tsbridge` fails fast on any config problem
+and logs it to stderr/journal before exiting non-zero — a malformed
+`config.yaml`, a missing `name`/`listen`/`target` on a bridge, or a
+duplicate `name` or `listen` path across two bridge entries all name the
+problem directly (e.g. `duplicate bridge name "x"`, `duplicate listen
+path "..."`) rather than failing partway through startup.
 
 ## Non-goals
 
 - No full `tailscaled`/TUN-based setup — `tsnet` only, userspace, no
   system network interface.
-- No hot-reload of `config.d/` — config errors are always fail-fast at
-  startup; restart `tsbridge` to pick up config changes.
+- No hot-reload — config errors are always fail-fast at startup; restart
+  `tsbridge` to pick up config changes.
 - No protocol awareness in the bridge itself — it copies raw TCP bytes in
   both directions. Anything protocol-specific (HTTP, TLS termination,
   etc.) belongs in whatever connects to the Unix socket, not here.

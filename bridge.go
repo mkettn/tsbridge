@@ -34,7 +34,7 @@ const (
 // it can't recover from, it sends on fatal (non-blocking) so the caller
 // can shut the whole process down rather than leaving a dead bridge
 // silently bound but unserved.
-func startBridge(ctx context.Context, srv *tsnet.Server, b ResolvedBridge, mode os.FileMode, group string, wg *sync.WaitGroup, fatal chan<- error) (net.Listener, error) {
+func startBridge(ctx context.Context, srv *tsnet.Server, b BridgeConfig, mode os.FileMode, group string, wg *sync.WaitGroup, fatal chan<- error) (net.Listener, error) {
 	if err := removeStaleSocket(b.Listen); err != nil {
 		return nil, err
 	}
@@ -141,7 +141,7 @@ func lookupGID(name string) (int, error) {
 // retried with backoff rather than ending the bridge. Any other error
 // closes the listener and reports itself on fatal so the bridge doesn't
 // keep the socket bound-but-dead with clients hanging in the backlog.
-func acceptLoop(ctx context.Context, srv *tsnet.Server, b ResolvedBridge, l net.Listener, wg *sync.WaitGroup, fatal chan<- error) {
+func acceptLoop(ctx context.Context, srv *tsnet.Server, b BridgeConfig, l net.Listener, wg *sync.WaitGroup, fatal chan<- error) {
 	backoff := acceptBackoffMin
 	for {
 		conn, err := l.Accept()
@@ -180,7 +180,7 @@ func isTemporaryAcceptError(err error) bool {
 
 var connCounter uint64
 
-func handleConn(ctx context.Context, srv *tsnet.Server, b ResolvedBridge, local net.Conn) {
+func handleConn(ctx context.Context, srv *tsnet.Server, b BridgeConfig, local net.Conn) {
 	defer local.Close()
 	id := atomic.AddUint64(&connCounter, 1)
 

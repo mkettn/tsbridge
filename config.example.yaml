@@ -1,7 +1,7 @@
-# tsbridge main config file.
+# tsbridge config file.
 #
 # Install this at /etc/tsbridge/config.yaml and adjust the values below.
-# See README.md for the full field reference and the config.d/ workflow.
+# See README.md for the full field reference.
 
 # Hostname this node presents to the tailnet's control server. Shows up in
 # `tailscale status` / the admin console as this node's name.
@@ -42,15 +42,12 @@ ephemeral: false
 # omitted.
 socket_mode: "0660"
 
-# Glob (or list of globs) of additional YAML files to merge in. Each
-# matched file may only contain a `bridges:` list (same schema as below)
-# -- it may NOT itself set `include`. A glob matching zero files (e.g. an
-# empty config.d/ on first install) is fine. Files are loaded in sorted
-# filename order.
-include: /etc/tsbridge/config.d/*.yml
-
-# Bridges defined directly in the main config file.
+# All bridges this instance serves. Each maps a local Unix socket to a
+# host:port reachable over the tailnet.
 bridges:
   - name: my-service
     listen: /run/tsbridge/my-service.sock
     target: remote-machine:1234
+  - name: other-service
+    listen: /run/tsbridge/other-service.sock
+    target: other-machine:5678

@@ -34,10 +34,7 @@ func TestStartBridge_CreatesSocketWithModeAndRemovesStale(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	b := ResolvedBridge{
-		BridgeConfig: BridgeConfig{Name: "test", Listen: sockPath, Target: "example.invalid:1"},
-		Source:       "inline",
-	}
+	b := BridgeConfig{Name: "test", Listen: sockPath, Target: "example.invalid:1"}
 
 	var wg sync.WaitGroup
 	fatal := make(chan error, 1)
@@ -76,10 +73,7 @@ func TestStartBridge_RefusesToRemoveNonSocketFile(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	b := ResolvedBridge{
-		BridgeConfig: BridgeConfig{Name: "test", Listen: path, Target: "example.invalid:1"},
-		Source:       "inline",
-	}
+	b := BridgeConfig{Name: "test", Listen: path, Target: "example.invalid:1"}
 	var wg sync.WaitGroup
 	fatal := make(chan error, 1)
 	srv := &tsnet.Server{}
@@ -110,10 +104,7 @@ func TestStartBridge_RefusesToStealLiveSocket(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	b := ResolvedBridge{
-		BridgeConfig: BridgeConfig{Name: "test", Listen: sockPath, Target: "example.invalid:1"},
-		Source:       "inline",
-	}
+	b := BridgeConfig{Name: "test", Listen: sockPath, Target: "example.invalid:1"}
 	var wg sync.WaitGroup
 	fatal := make(chan error, 1)
 	srv := &tsnet.Server{}
@@ -134,10 +125,7 @@ func TestStartBridge_ChownsToGroup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	b := ResolvedBridge{
-		BridgeConfig: BridgeConfig{Name: "test", Listen: sockPath, Target: "example.invalid:1"},
-		Source:       "inline",
-	}
+	b := BridgeConfig{Name: "test", Listen: sockPath, Target: "example.invalid:1"}
 
 	var wg sync.WaitGroup
 	fatal := make(chan error, 1)
@@ -226,10 +214,7 @@ func TestAcceptLoop_RetriesTemporaryThenReportsFatal(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	b := ResolvedBridge{
-		BridgeConfig: BridgeConfig{Name: "test-bridge", Listen: "/unused", Target: "example.invalid:1"},
-		Source:       "inline",
-	}
+	b := BridgeConfig{Name: "test-bridge", Listen: "/unused", Target: "example.invalid:1"}
 	var wg sync.WaitGroup
 	fatal := make(chan error, 1)
 

@@ -28,9 +28,8 @@ EnvironmentFile=/etc/tsbridge/tsbridge.env
 # outright at exec time, systemd status 216/GROUP -- "www-data" doesn't
 # exist on every distro, e.g. RHEL/Fedora use "apache"). Uncomment and
 # list every socket_group used by any bridge once you've picked one --
-# whether that bridge is added inline or via a config.d/ drop-in, this
-# is a unit file edit either way, since group membership is a
-# process-level grant that config alone can't extend.
+# this is a unit file edit, since group membership is a process-level
+# grant that config.yaml alone can't extend.
 #SupplementaryGroups=www-data
 
 # /run/tsbridge, owned by tsbridge:tsbridge, created before ExecStart runs.
@@ -46,8 +45,8 @@ RuntimeDirectoryMode=0755
 StateDirectory=tsbridge
 StateDirectoryMode=0700
 
-# /etc/tsbridge, covering config.yaml and config.d/*.yml. Not writable by
-# the service (see ProtectSystem=strict + ReadWritePaths below).
+# /etc/tsbridge, covering config.yaml. Not writable by the service (see
+# ProtectSystem=strict + ReadWritePaths below).
 ConfigurationDirectory=tsbridge
 
 # --- Hardening -------------------------------------------------------

@@ -85,9 +85,9 @@ func run() error {
 	}
 	log.Printf("joined tailnet as %q via %s (ephemeral=%v, state_dir=%q)", cfg.Hostname, controlServer, cfg.Ephemeral, cfg.StateDir)
 
-	log.Printf("resolved %d bridge(s):", len(cfg.Bridges))
+	log.Printf("configured %d bridge(s):", len(cfg.Bridges))
 	for _, b := range cfg.Bridges {
-		log.Printf("  - %s: %s -> %s [%s]", b.Name, b.Listen, b.Target, b.Source)
+		log.Printf("  - %s: %s -> %s", b.Name, b.Listen, b.Target)
 	}
 
 	var wg sync.WaitGroup
