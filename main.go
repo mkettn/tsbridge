@@ -39,11 +39,16 @@ func main() {
 	}
 }
 
+// defaultConfigPath is used when neither -c nor -config is given.
+const defaultConfigPath = "/etc/tsbridge/config.yaml"
+
 func run() error {
-	configPath := flag.String("config", "/etc/tsbridge/config.yaml", "path to the main YAML config file")
+	var configPath string
+	flag.StringVar(&configPath, "c", defaultConfigPath, "path to the YAML config file (shorthand for -config)")
+	flag.StringVar(&configPath, "config", defaultConfigPath, "path to the YAML config file")
 	flag.Parse()
 
-	cfg, err := LoadConfig(*configPath)
+	cfg, err := LoadConfig(configPath)
 	if err != nil {
 		return fmt.Errorf("config error: %w", err)
 	}

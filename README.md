@@ -145,6 +145,20 @@ bridge node's reachable hosts/ports there instead.
   nothing depends on its tailnet identity being stable, but you'll want a
   reusable auth key since a fresh registration happens on every restart.
 
+## Command-line flags
+
+`tsbridge` takes exactly one flag, in either short or long form:
+
+```
+-c, -config <path>   path to the YAML config file (default /etc/tsbridge/config.yaml)
+```
+
+`-c` and `-config` are two names for the same flag (last one wins if both
+are given); Go's flag parser accepts either with one dash or two (`-c`,
+`--c`, `-config`, `--config` all work). With no flag at all, `tsbridge`
+reads `/etc/tsbridge/config.yaml`. This is the only flag it currently
+supports.
+
 ## Config file format
 
 Top-level fields in `config.yaml`:
