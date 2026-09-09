@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -133,6 +134,12 @@ func LoadConfig(path string) (*Config, error) {
 		}
 	}
 
+	if main.ControlURL != "" {
+		if err := validateControlURL(main.ControlURL); err != nil {
+			return nil, fmt.Errorf("control_url: %w", err)
+		}
+	}
+
 	ephemeral := false
 	if main.Ephemeral != nil {
 		ephemeral = *main.Ephemeral
@@ -256,6 +263,23 @@ func checkBridges(bridges []ResolvedBridge) error {
 			return fmt.Errorf("duplicate listen path %q: defined in both %s and %s", b.Listen, prev, b.Source)
 		}
 		listens[b.Listen] = b.Source
+	}
+	return nil
+}
+
+// validateControlURL rejects a control_url that isn't a usable absolute
+// URL before it ever reaches tsnet.Server.ControlURL, where the same
+// problem either fails silently (an unreachable/malformed value) or
+// registers over plaintext. control_url decides which server this node
+// trusts for registration and policy, so http:// is rejected outright
+// rather than merely warned about.
+func validateControlURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("must be an absolute URL, e.g. https://headscale.example.com (got %q)", raw)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("must use https, got scheme %q -- a plaintext control server exposes registration and policy to tampering", u.Scheme)
 	}
 	return nil
 }

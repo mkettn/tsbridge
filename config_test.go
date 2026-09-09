@@ -249,6 +249,30 @@ bridges:
 	}
 }
 
+func TestLoadConfig_ControlURLRejectsNonHTTPS(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), `
+control_url: http://headscale.example.com
+bridges: []
+`)
+	_, err := LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err == nil || !strings.Contains(err.Error(), "https") {
+		t.Fatalf("want error requiring https, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ControlURLRejectsMalformed(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), `
+control_url: "headscale.example.com"
+bridges: []
+`)
+	_, err := LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err == nil || !strings.Contains(err.Error(), "control_url") {
+		t.Fatalf("want error naming control_url for a schemeless value, got: %v", err)
+	}
+}
+
 func TestLoadConfig_ControlURLDefaultsToEmpty(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), `

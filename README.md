@@ -82,6 +82,12 @@ control server:
 control_url: https://headscale.example.com
 ```
 
+`control_url` must be an absolute `https://` URL — `tsbridge` rejects it
+at startup otherwise (a missing scheme, or `http://`) rather than letting
+a typo surface later as an opaque `srv.Up` failure. `https` is required,
+not just the default, since this is the server the node registers with
+and trusts for policy; there's no config-only way to opt into plaintext.
+
 Everything else — registration (see above), the `bridges:` mechanism, the
 Unix sockets, the systemd unit — works identically; `tsbridge` doesn't
 know or care which control server it's registered with beyond this one
@@ -391,11 +397,13 @@ as..."**: with no `TS_AUTHKEY` set, `srv.Up` blocks until the one-time
 registration URL logged just before it is opened and approved — this is
 expected on first run (or any run without a persisted `state_dir`
 identity), not a hang. Check `journalctl -u tsbridge` for the URL. If
-you'd rather not do that step by hand, set `TS_AUTHKEY`. If it hangs even
-with `TS_AUTHKEY` set, or with a `control_url` pointed at a self-hosted
-Headscale, verify the control server is actually reachable from the
-bridge box (`curl -v <control_url>`) — a wrong or unreachable
-`control_url` fails the same way as no network at all.
+you'd rather not do that step by hand, set `TS_AUTHKEY`. A malformed or
+non-`https` `control_url` is rejected immediately at startup (fatal, not
+a hang) naming the problem. If it hangs even with `TS_AUTHKEY` set, or
+with a well-formed `control_url` pointed at a self-hosted Headscale,
+verify the control server is actually reachable from the bridge box
+(`curl -v <control_url>`) — an unreachable `control_url` fails the same
+way as no network at all.
 
 **Socket permission mismatches** (client gets `EACCES`/`permission
 denied`): check `socket_group`/`socket_mode` in `config.yaml` match the
