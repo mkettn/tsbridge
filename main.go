@@ -51,17 +51,25 @@ func run() error {
 		log.Println("warning: no bridges configured, nothing to do")
 	}
 
+	// TS_AUTHKEY is optional: pointing tsbridge at a control server (the
+	// Tailscale default, or control_url for a self-hosted Headscale) is
+	// enough on its own. With no auth key, tsnet drives registration
+	// itself and logs a one-time URL below to approve this node -- no
+	// separate registration step outside tsbridge. TS_AUTHKEY remains the
+	// way to skip that interactive step for unattended/first-boot setups
+	// (a Tailscale auth key or a Headscale preauth key both work).
 	authKey := os.Getenv("TS_AUTHKEY")
 	if authKey == "" {
-		log.Println("warning: TS_AUTHKEY is not set; tsnet will require interactive login on first run")
+		log.Println("no TS_AUTHKEY set: watch for a registration URL logged below and open it once to approve this node with the control server")
 	}
 
 	srv := &tsnet.Server{
-		Hostname:  cfg.Hostname,
-		Dir:       cfg.StateDir,
-		Ephemeral: cfg.Ephemeral,
-		AuthKey:   authKey,
-		UserLogf:  log.Printf,
+		Hostname:   cfg.Hostname,
+		Dir:        cfg.StateDir,
+		Ephemeral:  cfg.Ephemeral,
+		ControlURL: cfg.ControlURL,
+		AuthKey:    authKey,
+		UserLogf:   log.Printf,
 	}
 	defer srv.Close()
 
@@ -71,7 +79,11 @@ func run() error {
 	if _, err := srv.Up(ctx); err != nil {
 		return fmt.Errorf("joining tailnet: %w", err)
 	}
-	log.Printf("joined tailnet as %q (ephemeral=%v, state_dir=%q)", cfg.Hostname, cfg.Ephemeral, cfg.StateDir)
+	controlServer := cfg.ControlURL
+	if controlServer == "" {
+		controlServer = "default (Tailscale)"
+	}
+	log.Printf("joined tailnet as %q via %s (ephemeral=%v, state_dir=%q)", cfg.Hostname, controlServer, cfg.Ephemeral, cfg.StateDir)
 
 	log.Printf("resolved %d bridge(s):", len(cfg.Bridges))
 	for _, b := range cfg.Bridges {

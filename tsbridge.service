@@ -13,9 +13,13 @@ ExecStart=/usr/local/bin/tsbridge -config /etc/tsbridge/config.yaml
 Restart=on-failure
 RestartSec=5s
 
-# TS_AUTHKEY (and, for a persistent node, nothing else secret) lives here.
-# Create this file with `chmod 0600` and `chown tsbridge:tsbridge` -- never
-# commit it, and never put the key in config.yaml.
+# TS_AUTHKEY lives here (optional -- see README's "Registering the bridge
+# node"; omit it and tsbridge logs a one-time URL to approve the node
+# interactively instead). The file itself must still exist -- an empty
+# file is fine -- since EnvironmentFile= without a leading "-" fails the
+# unit if the path is missing. Create it with `chmod 0600` and `chown
+# tsbridge:tsbridge` -- never commit it, and never put the key in
+# config.yaml.
 EnvironmentFile=/etc/tsbridge/tsbridge.env
 
 # Group(s) tsbridge must belong to in order to chown a bridge socket to

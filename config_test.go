@@ -23,6 +23,7 @@ func TestLoadConfig_InlineAndIncludeMerge(t *testing.T) {
 hostname: bridge-test
 state_dir: /var/lib/tsbridge
 ephemeral: true
+control_url: https://headscale.example.com
 socket_group: www-data
 socket_mode: "0640"
 include: config.d/*.yml
@@ -45,6 +46,9 @@ bridges:
 
 	if cfg.Hostname != "bridge-test" || !cfg.Ephemeral || cfg.SocketGroup != "www-data" || cfg.SocketMode != 0640 {
 		t.Fatalf("unexpected top-level config: %+v", cfg)
+	}
+	if cfg.ControlURL != "https://headscale.example.com" {
+		t.Errorf("want control_url %q, got %q", "https://headscale.example.com", cfg.ControlURL)
 	}
 	if len(cfg.Bridges) != 2 {
 		t.Fatalf("want 2 bridges, got %d: %+v", len(cfg.Bridges), cfg.Bridges)
@@ -225,6 +229,37 @@ bridges:
 	_, err := LoadConfig(filepath.Join(dir, "config.yaml"))
 	if err == nil || !strings.Contains(err.Error(), "socket_mode") {
 		t.Fatalf("expected error naming socket_mode as a rejected global option, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ControlURLRejectedFromIncludedFile(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), `
+include: config.d/*.yml
+bridges: []
+`)
+	writeFile(t, filepath.Join(dir, "config.d", "a.yml"), `
+control_url: https://headscale.example.com
+bridges:
+  - {name: a, listen: /run/a.sock, target: h:1}
+`)
+	_, err := LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err == nil || !strings.Contains(err.Error(), "control_url") {
+		t.Fatalf("expected error naming control_url as a rejected global option, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ControlURLDefaultsToEmpty(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), `
+bridges: []
+`)
+	cfg, err := LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.ControlURL != "" {
+		t.Errorf("want empty control_url (tsnet default) when unset, got %q", cfg.ControlURL)
 	}
 }
 

@@ -35,6 +35,7 @@ type Config struct {
 	Hostname    string
 	StateDir    string
 	Ephemeral   bool
+	ControlURL  string
 	SocketGroup string
 	SocketMode  os.FileMode
 	Bridges     []ResolvedBridge
@@ -76,6 +77,7 @@ type rawConfig struct {
 	Hostname    string         `yaml:"hostname"`
 	StateDir    string         `yaml:"state_dir"`
 	Ephemeral   *bool          `yaml:"ephemeral"`
+	ControlURL  string         `yaml:"control_url"`
 	SocketGroup string         `yaml:"socket_group"`
 	SocketMode  string         `yaml:"socket_mode"`
 	Include     stringList     `yaml:"include"`
@@ -145,6 +147,7 @@ func LoadConfig(path string) (*Config, error) {
 		Hostname:    hostname,
 		StateDir:    main.StateDir,
 		Ephemeral:   ephemeral,
+		ControlURL:  main.ControlURL,
 		SocketGroup: main.SocketGroup,
 		SocketMode:  mode,
 		Bridges:     resolved,
@@ -167,6 +170,9 @@ func rejectGlobalOptions(file string, inc *rawConfig) error {
 	}
 	if inc.Ephemeral != nil {
 		set = append(set, "ephemeral")
+	}
+	if inc.ControlURL != "" {
+		set = append(set, "control_url")
 	}
 	if inc.SocketGroup != "" {
 		set = append(set, "socket_group")

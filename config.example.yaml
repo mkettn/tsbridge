@@ -21,6 +21,15 @@ state_dir: /var/lib/tsbridge
 # node's hostname or IP.
 ephemeral: false
 
+# Coordination/control server this node registers with and joins its
+# tailnet through. Leave unset (or empty) to use Tailscale's own control
+# server -- the normal case. Set this to run against a self-hosted
+# Headscale instance instead; tsbridge handles registering with it the
+# same way it would with Tailscale (see README's "Self-hosted control
+# servers" section), so pointing tsbridge here is the only step, no
+# separate registration procedure needed.
+# control_url: https://headscale.example.com
+
 # Unix group that should own each bridge socket, so other local
 # processes (e.g. a reverse proxy running as a different user) can
 # connect. The tsbridge service user must be a member of this group

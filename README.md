@@ -34,24 +34,63 @@ go build -o tsbridge .
 loading, merging, and validation (duplicate detection, malformed YAML,
 nested-include rejection, etc.) without requiring network access.
 
-## Generating a Tailscale auth key
+## Registering the bridge node
 
-Use a **tagged, ephemeral or reusable, ACL-scoped** auth key so the bridge
-node has no more tailnet access than it needs and doesn't linger if
-de-provisioned uncleanly:
+Pointing `tsbridge` at a control server is enough on its own — there is no
+separate registration procedure to run outside `tsbridge`. What that
+registration step looks like depends on whether you set `TS_AUTHKEY`:
 
-1. Go to the [Tailscale admin console → Settings → Keys](https://login.tailscale.com/admin/settings/keys).
-2. Generate an auth key with:
-   - a tag applied (e.g. `tag:tsbridge`) instead of leaving it untagged,
-     so ACLs can target it precisely (see the ACL snippet below),
-   - **Ephemeral** on if you're running `tsbridge` with `ephemeral: true`
-     in its config (see [Ephemeral vs. persistent](#ephemeral-vs-persistent-identity)
-     below) — leave it off for a persistent node,
-   - **Reusable** on only if you expect to reprovision this node from
-     scratch periodically; otherwise a single-use key is fine.
-3. Put the generated key in the bridge's `EnvironmentFile` (see
-   [Install](#install) below) as `TS_AUTHKEY=tskey-auth-...`. Never put it
-   in `config.yaml` or commit it anywhere.
+- **No `TS_AUTHKEY` set** (works against both Tailscale and a self-hosted
+  Headscale control server): on first run, `tsbridge` logs a one-time
+  registration URL and waits for it to be approved before continuing —
+  watch `journalctl -u tsbridge` (or stdout, if running it directly) right
+  after starting it. With `ephemeral: false` (the default) and a
+  persistent `state_dir`, this only happens once; every later restart
+  reuses the identity already stored there with no further interaction.
+  This is the simplest path if you're fine approving the node once by
+  hand.
+- **`TS_AUTHKEY` set**: skips the interactive step entirely, so it's the
+  one to use for unattended/first-boot provisioning (config management,
+  autoscaled boxes, CI). Generate a **tagged, ephemeral-or-reusable,
+  ACL-scoped** key so the bridge node has no more tailnet access than it
+  needs and doesn't linger if de-provisioned uncleanly:
+
+  1. Tailscale: [admin console → Settings → Keys](https://login.tailscale.com/admin/settings/keys).
+     Headscale: `headscale preauthkeys create` on the Headscale server.
+  2. Generate a key with:
+     - a tag applied (e.g. `tag:tsbridge`) instead of leaving it untagged,
+       so ACLs can target it precisely (see the ACL snippet below) —
+       Headscale preauth keys are scoped to a user instead of a tag; check
+       your Headscale version's docs for its equivalent of tag-based ACLs,
+     - **Ephemeral** on if you're running `tsbridge` with `ephemeral: true`
+       in its config (see [Ephemeral vs. persistent](#ephemeral-vs-persistent-identity)
+       below) — leave it off for a persistent node,
+     - **Reusable** on only if you expect to reprovision this node from
+       scratch periodically; otherwise a single-use key is fine.
+  3. Put the generated key in the bridge's `EnvironmentFile` (see
+     [Install](#install) below) as `TS_AUTHKEY=tskey-auth-...` (Tailscale)
+     or the Headscale-issued equivalent. Never put it in `config.yaml` or
+     commit it anywhere.
+
+### Self-hosted control servers (Headscale)
+
+Set `control_url` in `config.yaml` to point `tsbridge` at a self-hosted
+[Headscale](https://headscale.net/) instance instead of Tailscale's own
+control server:
+
+```yaml
+control_url: https://headscale.example.com
+```
+
+Everything else — registration (see above), the `bridges:` mechanism, the
+Unix sockets, the systemd unit — works identically; `tsbridge` doesn't
+know or care which control server it's registered with beyond this one
+URL. Leave `control_url` unset (the default) to use Tailscale's own
+control server. The [suggested ACL snippet](#suggested-tailnet-acl-snippet)
+below is Tailscale-policy-file syntax; translate it to Headscale's ACL
+format (Headscale supports the same tag-based policy syntax as of recent
+versions — check your Headscale version's docs) if you're restricting the
+bridge node's reachable hosts/ports there instead.
 
 ### Ephemeral vs. persistent identity
 
@@ -75,6 +114,7 @@ Top-level fields in `config.yaml`:
 | `hostname`     | `tsbridge`       | Node name shown in the tailnet / admin console                          |
 | `state_dir`    | (tsnet default)  | Directory for persistent tsnet state; matters when `ephemeral: false`   |
 | `ephemeral`    | `false`          | Register as an ephemeral tailnet node                                   |
+| `control_url`  | (Tailscale)      | Control server to register with; set for a self-hosted Headscale        |
 | `socket_group` | (unset)          | Unix group to own every bridge socket                                   |
 | `socket_mode`  | `"0660"`         | Permission bits applied to every bridge socket                          |
 | `include`      | (unset)          | Glob, or list of globs, of additional files to merge in                 |
@@ -178,7 +218,11 @@ service doesn't already belong to.
    sudo vi /etc/tsbridge/config.yaml    # edit hostname/bridges for your setup
    ```
 
-4. Create the auth key environment file (see [above](#generating-a-tailscale-auth-key)):
+4. Create the environment file `EnvironmentFile=` points at (see
+   [Registering the bridge node](#registering-the-bridge-node) above).
+   `TS_AUTHKEY` is optional — skip this step and `tsbridge` will log a
+   one-time registration URL to approve on first start instead — but it's
+   the way to go for unattended provisioning:
 
    ```sh
    sudo install -m 0600 -o tsbridge -g tsbridge /dev/null /etc/tsbridge/tsbridge.env
@@ -187,8 +231,11 @@ service doesn't already belong to.
    sudo chown tsbridge:tsbridge /etc/tsbridge/tsbridge.env
    ```
 
-   This file must never be committed to a repository or shared config
-   management tree in plaintext; treat it like any other credential.
+   The file must exist either way (`EnvironmentFile=` in the unit isn't
+   marked optional) — an empty file is fine if you're relying on the
+   interactive registration flow instead of `TS_AUTHKEY`. It must never be
+   committed to a repository or shared config management tree in
+   plaintext; treat it like any other credential.
 
 5. Install and start the systemd unit:
 
@@ -338,6 +385,17 @@ to exercise `srv.Dial` without it.
    `/tmp/tsbridge-test/run/` are gone.
 
 ## Troubleshooting
+
+**`tsbridge` hangs after "joining tailnet" / never logs "joined tailnet
+as..."**: with no `TS_AUTHKEY` set, `srv.Up` blocks until the one-time
+registration URL logged just before it is opened and approved — this is
+expected on first run (or any run without a persisted `state_dir`
+identity), not a hang. Check `journalctl -u tsbridge` for the URL. If
+you'd rather not do that step by hand, set `TS_AUTHKEY`. If it hangs even
+with `TS_AUTHKEY` set, or with a `control_url` pointed at a self-hosted
+Headscale, verify the control server is actually reachable from the
+bridge box (`curl -v <control_url>`) — a wrong or unreachable
+`control_url` fails the same way as no network at all.
 
 **Socket permission mismatches** (client gets `EACCES`/`permission
 denied`): check `socket_group`/`socket_mode` in `config.yaml` match the
