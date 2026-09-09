@@ -43,11 +43,14 @@ ephemeral: false
 socket_mode: "0660"
 
 # All bridges this instance serves. Each maps a local Unix socket to a
-# host:port reachable over the tailnet.
+# host:port reachable over the tailnet. `type` is optional and defaults
+# to "tcp" -- the only value currently supported -- so it's normally
+# left out; shown once below just to name it.
 bridges:
   - name: my-service
     listen: /run/tsbridge/my-service.sock
     target: remote-machine:1234
+    type: tcp
   - name: other-service
     listen: /run/tsbridge/other-service.sock
     target: other-machine:5678

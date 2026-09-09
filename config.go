@@ -15,11 +15,19 @@ import (
 
 const defaultSocketMode os.FileMode = 0660
 
+// defaultBridgeType is used when a bridge doesn't set type:, and is
+// currently the only value checkBridges accepts.
+const defaultBridgeType = "tcp"
+
 // BridgeConfig is one listen-socket -> tailnet-target mapping.
 type BridgeConfig struct {
 	Name   string `yaml:"name"`
 	Listen string `yaml:"listen"`
 	Target string `yaml:"target"`
+	// Type is the network tsbridge dials on the tailnet side (passed
+	// straight through to tsnet.Server.Dial's network argument). "tcp"
+	// is the only supported value for now; unset defaults to it.
+	Type string `yaml:"type"`
 }
 
 // Config is the fully resolved, validated configuration used at runtime.
@@ -56,6 +64,10 @@ func LoadConfig(path string) (*Config, error) {
 	bridges := raw.Bridges
 	for i := range bridges {
 		bridges[i].Listen = resolvePath(baseDir, bridges[i].Listen)
+		bridges[i].Type = strings.ToLower(strings.TrimSpace(bridges[i].Type))
+		if bridges[i].Type == "" {
+			bridges[i].Type = defaultBridgeType
+		}
 	}
 
 	if err := checkBridges(bridges); err != nil {
@@ -135,6 +147,9 @@ func checkBridges(bridges []BridgeConfig) error {
 		}
 		if b.Target == "" {
 			return fmt.Errorf("bridge %q is missing required field 'target'", b.Name)
+		}
+		if b.Type != defaultBridgeType {
+			return fmt.Errorf("bridge %q has unsupported type %q; only %q is currently supported", b.Name, b.Type, defaultBridgeType)
 		}
 		if names[b.Name] {
 			return fmt.Errorf("duplicate bridge name %q", b.Name)
