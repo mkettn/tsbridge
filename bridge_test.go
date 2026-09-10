@@ -279,7 +279,9 @@ func TestStartHTTPBridge_ReverseProxiesToTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer backend.Close()
+	hostCh := make(chan string, 1)
 	backendSrv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hostCh <- r.Host
 		w.Header().Set("X-Backend", "yes")
 		fmt.Fprintf(w, "hello from %s", r.URL.Path)
 	})}
@@ -317,6 +319,19 @@ func TestStartHTTPBridge_ReverseProxiesToTarget(t *testing.T) {
 	}
 	if resp.Header.Get("X-Backend") != "yes" {
 		t.Errorf("missing backend response header, got: %v", resp.Header)
+	}
+
+	// The backend must see target's own hostname, not whatever Host
+	// header the client sent to the Unix socket ("unix", here) --
+	// a virtual-host-style backend (tailscale serve, notably) 404s
+	// otherwise since it routes by the Host it expects for itself.
+	select {
+	case gotHost := <-hostCh:
+		if gotHost != b.Target {
+			t.Errorf("backend saw Host %q, want %q", gotHost, b.Target)
+		}
+	default:
+		t.Fatal("backend handler never ran")
 	}
 
 	select {

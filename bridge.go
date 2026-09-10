@@ -280,7 +280,21 @@ type httpBridge struct {
 }
 
 func startHTTPBridge(ctx context.Context, dial dialFunc, b BridgeConfig, l net.Listener, fatal chan<- error) *httpBridge {
-	proxy := httputil.NewSingleHostReverseProxy(&url.URL{Scheme: "http", Host: b.Target})
+	targetURL := &url.URL{Scheme: "http", Host: b.Target}
+	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+	defaultDirector := proxy.Director
+	proxy.Director = func(r *http.Request) {
+		defaultDirector(r)
+		// NewSingleHostReverseProxy's default Director rewrites
+		// r.URL.Host (what gets dialed) but leaves r.Host -- the
+		// actual Host header sent on the wire -- as whatever arrived
+		// on the incoming request. Most backends ignore that, but a
+		// virtual-host-style one (tailscale serve, for one: it keys
+		// routes by the target node's own hostname) won't recognize
+		// the request as its own and 404s. Force it to target's host
+		// so the backend sees the Host it actually expects.
+		r.Host = targetURL.Host
+	}
 	proxy.Transport = &http.Transport{
 		DialContext: func(dialCtx context.Context, network, addr string) (net.Conn, error) {
 			return dial(dialCtx, "tcp", addr)

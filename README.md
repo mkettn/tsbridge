@@ -225,6 +225,14 @@ HTTP traffic fine (it's just bytes on a TCP connection either way). What
 - **A real `502 Bad Gateway`** (rather than a client-visible connection
   failure) when `target` is unreachable, since tsbridge is now the one
   terminating the HTTP response.
+- **The right `Host` header for `target`.** The proxied request's `Host`
+  header is set to `target` itself, not left as whatever Host the client
+  sent to the Unix socket. This matters for any backend that routes or
+  validates by hostname — [`tailscale serve`](https://tailscale.com/docs/features/tailscale-serve)
+  being a notable one: it keys its own routes by the serving node's
+  MagicDNS name, and a mismatched `Host` header gets you a `404 page not
+  found` from `tailscaled` itself rather than from your actual service
+  (see the troubleshooting entry below if you still see that).
 
 What it doesn't do: no TLS (`target` is always dialed as plain HTTP; for
 an HTTPS-only tailnet service, use `tcp` mode instead — tsbridge stays
@@ -502,6 +510,19 @@ blocking `tag:tsbridge` from reaching it).
 above (the socket side is fine, `target` isn't reachable) — check
 `journalctl -u tsbridge` for the request-level error line naming the
 bridge, method, path, and the underlying dial/HTTP error.
+
+**`mode: http` bridge returns `404 page not found` against a `target`
+published with `tailscale serve`**: this is `tailscaled` on the target
+node responding, not your service — it means the request reached the
+target but wasn't recognized as belonging to any configured route.
+tsbridge already sends the correct `Host` header for this (see
+[HTTP mode](#http-mode-reverse-proxy) above), so if you're still seeing
+it: this is also a [known `tailscaled` issue](https://github.com/tailscale/tailscale/issues/17728)
+where `tailscale serve --http` 404s until HTTPS certificates are
+provisioned for the tailnet, even when only HTTP is actually being
+served. Check the tailnet's DNS settings in the admin console
+(Settings → DNS → HTTPS Certificates) on the *target*'s side — this is
+unrelated to tsbridge and nothing in `config.yaml` affects it.
 
 **Diagnosing config errors**: `tsbridge` fails fast on any config problem
 and logs it to stderr/journal before exiting non-zero — a malformed
