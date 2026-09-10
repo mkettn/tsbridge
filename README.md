@@ -180,6 +180,7 @@ Each bridge entry:
   listen: /run/tsbridge/my-service.sock   # Unix socket path to create
   target: remote-machine:1234             # host:port reachable over the tailnet
   mode: tcp                 # optional, defaults to "tcp" -- see "HTTP mode" below for the other option
+  rewrite_host: false       # mode: http only, optional, defaults to false -- see "HTTP mode" below
 ```
 
 `bridges:` is a flat list — every service `tsbridge` proxies is one entry
@@ -225,14 +226,21 @@ HTTP traffic fine (it's just bytes on a TCP connection either way). What
 - **A real `502 Bad Gateway`** (rather than a client-visible connection
   failure) when `target` is unreachable, since tsbridge is now the one
   terminating the HTTP response.
-- **The right `Host` header for `target`.** The proxied request's `Host`
-  header is set to `target` itself, not left as whatever Host the client
-  sent to the Unix socket. This matters for any backend that routes or
-  validates by hostname — [`tailscale serve`](https://tailscale.com/docs/features/tailscale-serve)
-  being a notable one: it keys its own routes by the serving node's
-  MagicDNS name, and a mismatched `Host` header gets you a `404 page not
-  found` from `tailscaled` itself rather than from your actual service
-  (see the troubleshooting entry below if you still see that).
+- **`rewrite_host: true`, for a target that routes or validates by
+  hostname.** By default (`rewrite_host` unset or `false`) the proxied
+  request's `Host` header passes through unchanged — whatever Host the
+  client sent to the Unix socket, `target` gets the same one. Most
+  backends don't care. Some do:
+  [`tailscale serve`](https://tailscale.com/docs/features/tailscale-serve)
+  is a notable one, since it keys its own routes by the serving node's
+  MagicDNS name — set `rewrite_host: true` on that bridge and the
+  proxied request's `Host` header becomes `target` itself instead of
+  whatever the client sent, which is what a target like that expects. A
+  mismatched `Host` header gets you a `404 page not found` from
+  `tailscaled` itself rather than from your actual service (see the
+  troubleshooting entry below if you still see that after setting it).
+  `rewrite_host` is rejected as a fatal config error on any bridge that
+  isn't `mode: http`.
 
 What it doesn't do: no TLS (`target` is always dialed as plain HTTP; for
 an HTTPS-only tailnet service, use `tcp` mode instead — tsbridge stays
@@ -515,9 +523,12 @@ bridge, method, path, and the underlying dial/HTTP error.
 published with `tailscale serve`**: this is `tailscaled` on the target
 node responding, not your service — it means the request reached the
 target but wasn't recognized as belonging to any configured route.
-tsbridge already sends the correct `Host` header for this (see
-[HTTP mode](#http-mode-reverse-proxy) above), so if you're still seeing
-it: this is also a [known `tailscaled` issue](https://github.com/tailscale/tailscale/issues/17728)
+Check first that `rewrite_host: true` is actually set on that bridge
+(it defaults to `false` — see [HTTP mode](#http-mode-reverse-proxy)
+above); without it, `target` receives whatever `Host` header the client
+sent, which a `tailscale serve` target won't recognize as its own. If
+`rewrite_host: true` is already set and you're still seeing it: this is
+also a [known `tailscaled` issue](https://github.com/tailscale/tailscale/issues/17728)
 where `tailscale serve --http` 404s until HTTPS certificates are
 provisioned for the tailnet, even when only HTTP is actually being
 served. Check the tailnet's DNS settings in the admin console

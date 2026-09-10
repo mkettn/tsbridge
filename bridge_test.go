@@ -273,20 +273,32 @@ func unixHTTPClient(sockPath string) *http.Client {
 	}
 }
 
-func TestStartHTTPBridge_ReverseProxiesToTarget(t *testing.T) {
+// startHTTPTestBackend runs a throwaway HTTP server standing in for the
+// tailnet target: it echoes the request path in the body, reports the
+// Host header it saw on hostCh, and sets X-Backend so tests can confirm
+// the response actually came from here.
+func startHTTPTestBackend(t *testing.T) (addr string, hostCh chan string) {
+	t.Helper()
 	backend, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer backend.Close()
-	hostCh := make(chan string, 1)
+	hostCh = make(chan string, 1)
 	backendSrv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hostCh <- r.Host
 		w.Header().Set("X-Backend", "yes")
 		fmt.Fprintf(w, "hello from %s", r.URL.Path)
 	})}
 	go backendSrv.Serve(backend)
-	defer backendSrv.Close()
+	t.Cleanup(func() {
+		backendSrv.Close()
+		backend.Close()
+	})
+	return backend.Addr().String(), hostCh
+}
+
+func TestStartHTTPBridge_ReverseProxiesToTarget(t *testing.T) {
+	backendAddr, hostCh := startHTTPTestBackend(t)
 
 	dir := t.TempDir()
 	sockPath := filepath.Join(dir, "http.sock")
@@ -295,7 +307,7 @@ func TestStartHTTPBridge_ReverseProxiesToTarget(t *testing.T) {
 
 	b := BridgeConfig{Name: "http-test", Listen: sockPath, Target: "example.invalid:80", Mode: "http"}
 	fatal := make(chan error, 1)
-	rb, err := startBridge(ctx, dialToAddr(backend.Addr().String()), b, 0660, "", fatal)
+	rb, err := startBridge(ctx, dialToAddr(backendAddr), b, 0660, "", fatal)
 	if err != nil {
 		t.Fatalf("startBridge: %v", err)
 	}
@@ -321,14 +333,13 @@ func TestStartHTTPBridge_ReverseProxiesToTarget(t *testing.T) {
 		t.Errorf("missing backend response header, got: %v", resp.Header)
 	}
 
-	// The backend must see target's own hostname, not whatever Host
-	// header the client sent to the Unix socket ("unix", here) --
-	// a virtual-host-style backend (tailscale serve, notably) 404s
-	// otherwise since it routes by the Host it expects for itself.
+	// Default (rewrite_host unset/false): the client's own Host header
+	// -- "unix", from the http://unix/... URL unixHTTPClient uses --
+	// passes through unchanged, not target's hostname.
 	select {
 	case gotHost := <-hostCh:
-		if gotHost != b.Target {
-			t.Errorf("backend saw Host %q, want %q", gotHost, b.Target)
+		if gotHost != "unix" {
+			t.Errorf("backend saw Host %q, want client's original %q", gotHost, "unix")
 		}
 	default:
 		t.Fatal("backend handler never ran")
@@ -338,6 +349,42 @@ func TestStartHTTPBridge_ReverseProxiesToTarget(t *testing.T) {
 	case err := <-fatal:
 		t.Errorf("unexpected fatal error: %v", err)
 	default:
+	}
+}
+
+func TestStartHTTPBridge_RewriteHostSetsTargetHost(t *testing.T) {
+	backendAddr, hostCh := startHTTPTestBackend(t)
+
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "http-rewrite.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	b := BridgeConfig{Name: "http-rewrite", Listen: sockPath, Target: "example.invalid:80", Mode: "http", RewriteHost: true}
+	fatal := make(chan error, 1)
+	rb, err := startBridge(ctx, dialToAddr(backendAddr), b, 0660, "", fatal)
+	if err != nil {
+		t.Fatalf("startBridge: %v", err)
+	}
+	defer shutdown(t, cancel, rb)
+
+	resp, err := unixHTTPClient(sockPath).Get("http://unix/some/path")
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+
+	// rewrite_host: true forces target's own hostname onto the proxied
+	// request, e.g. for a target that routes/validates by Host (tailscale
+	// serve, notably) rather than whatever the client sent.
+	select {
+	case gotHost := <-hostCh:
+		if gotHost != b.Target {
+			t.Errorf("backend saw Host %q, want %q", gotHost, b.Target)
+		}
+	default:
+		t.Fatal("backend handler never ran")
 	}
 }
 

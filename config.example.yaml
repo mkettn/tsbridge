@@ -57,3 +57,9 @@ bridges:
     listen: /run/tsbridge/my-http-service.sock
     target: other-machine:8080
     mode: http
+    # mode: http only. Optional, defaults to false: the proxied request's
+    # Host header passes through unchanged (whatever the client sent).
+    # Set true if target routes/validates by hostname instead -- a
+    # `tailscale serve`-published target is the common case -- so it
+    # gets target's own host:port as its Host header instead.
+    # rewrite_host: true

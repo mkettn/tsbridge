@@ -35,6 +35,12 @@ type BridgeConfig struct {
 	// copy; "http" terminates HTTP on the socket and reverse-proxies
 	// each request to Target instead.
 	Mode string `yaml:"mode"`
+	// RewriteHost only applies to mode: http (rejected on any other
+	// mode). false (the default) forwards the request to Target with
+	// whatever Host header the client sent unchanged. true rewrites it
+	// to Target's own host:port instead -- needed for a target that
+	// routes or validates by hostname (tailscale serve, notably).
+	RewriteHost bool `yaml:"rewrite_host"`
 }
 
 // Config is the fully resolved, validated configuration used at runtime.
@@ -157,6 +163,9 @@ func checkBridges(bridges []BridgeConfig) error {
 		}
 		if !supportedBridgeModes[b.Mode] {
 			return fmt.Errorf("bridge %q has unsupported mode %q; supported modes are tcp, http", b.Name, b.Mode)
+		}
+		if b.RewriteHost && b.Mode != "http" {
+			return fmt.Errorf("bridge %q sets rewrite_host, but that only applies to mode: http (bridge is mode: %s)", b.Name, b.Mode)
 		}
 		if names[b.Name] {
 			return fmt.Errorf("duplicate bridge name %q", b.Name)

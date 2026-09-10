@@ -102,6 +102,59 @@ bridges:
 	}
 }
 
+func TestLoadConfig_RewriteHostDefaultsToFalse(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), `
+bridges:
+  - name: svc
+    listen: /run/svc.sock
+    target: h:1
+    mode: http
+`)
+	cfg, err := LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Bridges[0].RewriteHost {
+		t.Error("want rewrite_host to default to false")
+	}
+}
+
+func TestLoadConfig_RewriteHostAcceptedOnHTTPMode(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), `
+bridges:
+  - name: svc
+    listen: /run/svc.sock
+    target: h:1
+    mode: http
+    rewrite_host: true
+`)
+	cfg, err := LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if !cfg.Bridges[0].RewriteHost {
+		t.Error("want rewrite_host true")
+	}
+}
+
+func TestLoadConfig_RewriteHostRejectedOnTCPMode(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), `
+bridges:
+  - name: svc
+    listen: /run/svc.sock
+    target: h:1
+    mode: tcp
+    rewrite_host: true
+`)
+	_, err := LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err == nil || !strings.Contains(err.Error(), "rewrite_host") {
+		t.Fatalf("want error naming rewrite_host as invalid for mode: tcp, got: %v", err)
+	}
+}
+
 func TestLoadConfig_RelativePathsResolveAgainstConfigDir(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), `

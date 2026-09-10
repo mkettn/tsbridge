@@ -282,18 +282,21 @@ type httpBridge struct {
 func startHTTPBridge(ctx context.Context, dial dialFunc, b BridgeConfig, l net.Listener, fatal chan<- error) *httpBridge {
 	targetURL := &url.URL{Scheme: "http", Host: b.Target}
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
-	defaultDirector := proxy.Director
-	proxy.Director = func(r *http.Request) {
-		defaultDirector(r)
-		// NewSingleHostReverseProxy's default Director rewrites
-		// r.URL.Host (what gets dialed) but leaves r.Host -- the
-		// actual Host header sent on the wire -- as whatever arrived
-		// on the incoming request. Most backends ignore that, but a
-		// virtual-host-style one (tailscale serve, for one: it keys
-		// routes by the target node's own hostname) won't recognize
-		// the request as its own and 404s. Force it to target's host
-		// so the backend sees the Host it actually expects.
-		r.Host = targetURL.Host
+	// NewSingleHostReverseProxy's default Director rewrites r.URL.Host
+	// (what gets dialed) but leaves r.Host -- the actual Host header
+	// sent on the wire -- as whatever arrived on the incoming request.
+	// That's the default here too (b.RewriteHost false): most backends
+	// don't care what Host they're addressed as. A virtual-host-style
+	// one does (tailscale serve, for one: it keys routes by the target
+	// node's own hostname, and 404s on anything else) -- rewrite_host:
+	// true forces r.Host to target's host so a backend like that
+	// recognizes the request as its own.
+	if b.RewriteHost {
+		defaultDirector := proxy.Director
+		proxy.Director = func(r *http.Request) {
+			defaultDirector(r)
+			r.Host = targetURL.Host
+		}
 	}
 	proxy.Transport = &http.Transport{
 		DialContext: func(dialCtx context.Context, network, addr string) (net.Conn, error) {
