@@ -63,6 +63,13 @@ cd example && caddy run
 curl http://localhost:1234/
 ```
 
+Or skip both steps above with `example/run.sh`, which builds `tsbridge`
+and runs it alongside `caddy run` (Ctrl+C stops both):
+
+```sh
+TS_AUTHKEY=tskey-auth-xxxxx example/run.sh
+```
+
 `example/Caddyfile` reverse-proxies `localhost:1234` straight to the Unix
 socket tsbridge created. This is the same shape as the
 [manual end-to-end test](#manual-end-to-end-test) below, just wired to a
