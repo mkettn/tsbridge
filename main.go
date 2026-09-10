@@ -11,6 +11,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -89,52 +90,60 @@ func run() error {
 	}
 	log.Printf("joined tailnet as %q via %s (ephemeral=%v, state_dir=%q)", cfg.Hostname, controlServer, cfg.Ephemeral, cfg.StateDir)
 
-	log.Printf("configured %d bridge(s):", len(cfg.Bridges))
-	for _, b := range cfg.Bridges {
-		log.Printf("  - %s [%s]: %s -> %s", b.Name, b.Mode, b.Listen, b.Target)
+	statePath := ""
+	if cfg.StateDir != "" {
+		statePath = filepath.Join(cfg.StateDir, managedBridgesFileName)
+	}
+	manager := newBridgeManager(ctx, srv.Dial, cfg.SocketMode, cfg.SocketGroup, statePath)
+	started, attempted, err := manager.startAll(cfg.Bridges)
+	if err != nil {
+		return err
 	}
 
-	var running []runningBridge
-	// Buffered so a bridge can report a fatal error and return without
-	// blocking on a reader that may already have moved on to shutdown.
-	fatal := make(chan error, len(cfg.Bridges))
-	for _, b := range cfg.Bridges {
-		rb, err := startBridge(ctx, srv.Dial, b, cfg.SocketMode, cfg.SocketGroup, fatal)
-		if err != nil {
-			log.Printf("bridge %s: failed to start, skipping: %v", b.Name, err)
-			continue
-		}
-		running = append(running, rb)
+	log.Printf("running %d/%d bridge(s):", started, attempted)
+	for _, b := range manager.List() {
+		log.Printf("  - %s [%s/%s]: %s -> %s", b.Name, b.Mode, b.Source, b.Listen, b.Target)
 	}
 
-	if len(cfg.Bridges) > 0 && len(running) == 0 {
+	// Only fatal if bridges were actually attempted and none survived --
+	// zero configured to begin with (attempted == 0) is the existing
+	// "nothing to do" warning above, not a startup failure.
+	if attempted > 0 && started == 0 {
 		return errors.New("no bridges could be started")
 	}
 
-	var runErr error
-	select {
-	case <-ctx.Done():
-	case err := <-fatal:
-		// A bridge died for good (not just shutting down); take the
-		// whole process down so Restart=on-failure actually fires
-		// rather than leaving a silently dead bridge.
-		runErr = err
-		stop()
+	var mgmt runningBridge
+	if cfg.ManagementSocket != "" {
+		mgmt, err = startManagementServer(cfg.ManagementSocket, cfg.ManagementSocketMode, cfg.ManagementSocketGroup, manager)
+		if err != nil {
+			return fmt.Errorf("starting management socket: %w", err)
+		}
+		log.Printf("management API listening on %s", cfg.ManagementSocket)
 	}
+
+	<-ctx.Done()
+	// A bridge's own fatal error no longer reaches here: each bridge is
+	// isolated (see manage.go's watchFatal) and only removes itself from
+	// the running set, so the only thing that ends run() now is a signal.
 	log.Println("shutting down...")
 
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownDrainTimeout)
 	defer cancelShutdown()
 	var shutdownWG sync.WaitGroup
-	for _, rb := range running {
+	shutdownWG.Add(1)
+	go func() {
+		defer shutdownWG.Done()
+		manager.Shutdown(shutdownCtx)
+	}()
+	if mgmt != nil {
 		shutdownWG.Add(1)
 		go func() {
 			defer shutdownWG.Done()
-			rb.Shutdown(shutdownCtx)
+			mgmt.Shutdown(shutdownCtx)
 		}()
 	}
 	shutdownWG.Wait()
 
 	log.Println("shutdown complete")
-	return runErr
+	return nil
 }

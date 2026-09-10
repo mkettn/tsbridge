@@ -13,7 +13,7 @@ directly to `remote-machine:1234` on the tailnet.
 
 ## Contents
 
-- `main.go`, `config.go`, `bridge.go` — the `tsbridge` binary
+- `main.go`, `config.go`, `bridge.go`, `manage.go` — the `tsbridge` binary
 - `config.example.yaml` — annotated example config
 - `tsbridge.service` — systemd unit
 - `tsbridge-sysusers.conf` — `systemd-sysusers` snippet for the service user
@@ -171,6 +171,9 @@ Top-level fields in `config.yaml`:
 | `control_url`  | (Tailscale)      | Control server to register with; set for a self-hosted Headscale        |
 | `socket_group` | (unset)          | Unix group to own every bridge socket                                   |
 | `socket_mode`  | `"0660"`         | Permission bits applied to every bridge socket                          |
+| `management_socket` | (unset)    | Unix socket for the runtime bridge-management API; unset disables it    |
+| `management_socket_group` | (unset) | Unix group to own the management socket                            |
+| `management_socket_mode` | `"0600"` | Permission bits applied to the management socket                      |
 | `bridges`      | `[]`             | List of `{name, listen, target}` bridge mappings                        |
 
 Each bridge entry:
@@ -186,9 +189,11 @@ Each bridge entry:
 `bridges:` is a flat list — every service `tsbridge` proxies is one entry
 here, in the one `config.yaml` file. `name` and `listen` must each be
 unique across the list; a duplicate of either is a fatal startup error
-naming the conflict. Adding, removing, or changing a bridge means editing
-`config.yaml` and restarting `tsbridge` — there is no hot-reload (see
-[Non-goals](#non-goals)).
+naming the conflict. Adding, removing, or changing a bridge here means
+editing `config.yaml` and restarting `tsbridge` — `config.yaml` itself
+has no hot-reload (see [Non-goals](#non-goals)). To change bridges
+without a restart, use the runtime management API instead — see
+[Runtime bridge management](#runtime-bridge-management) below.
 
 `mode` selects what tsbridge *does* with the connection, not what network
 it dials — the tailnet-side dial is always TCP no matter what `mode` is.
@@ -262,6 +267,103 @@ directory. This is mostly useful for self-contained setups (see
 they don't depend on the config file's location matching
 `RuntimeDirectory=`/`StateDirectory=` by coincidence.
 
+## Runtime bridge management
+
+Setting `management_socket:` starts a small JSON/HTTP API on its own
+Unix socket, letting bridges be added and removed while `tsbridge` keeps
+running — instead of editing `config.yaml` and restarting. It's unset
+(disabled) by default; nothing changes unless you turn it on.
+
+```yaml
+state_dir: /var/lib/tsbridge   # required if management_socket is set
+management_socket: /run/tsbridge/control.sock
+management_socket_mode: "0600"     # optional, defaults to "0600" (owner-only --
+                                    # this socket can create a bridge to *any*
+                                    # tailnet target, a bigger blast radius than
+                                    # any one bridge socket)
+# management_socket_group: admins  # optional, its own group -- independent of socket_group
+```
+
+It speaks plain JSON over HTTP on that socket:
+
+| Method   | Path            | Does |
+|----------|-----------------|------|
+| `GET`    | `/bridges`      | List every currently running bridge |
+| `GET`    | `/bridges/{name}` | One bridge's current info |
+| `POST`   | `/bridges`      | Add a bridge (body: same fields as a `bridges:` entry) |
+| `DELETE` | `/bridges/{name}` | Stop and remove a bridge |
+
+```sh
+# Add a bridge.
+curl --unix-socket /run/tsbridge/control.sock \
+  -X POST http://unix/bridges \
+  -H 'content-type: application/json' \
+  -d '{"name":"svc","listen":"/run/tsbridge/svc.sock","target":"remote-machine:1234"}'
+
+# List what's running.
+curl --unix-socket /run/tsbridge/control.sock http://unix/bridges
+
+# Remove it again.
+curl --unix-socket /run/tsbridge/control.sock -X DELETE http://unix/bridges/svc
+```
+
+`POST` accepts the same fields as a `bridges:` entry (`name`, `listen`,
+`target`, `mode`, `rewrite_host`) with the same validation and defaults
+(`mode` defaults to `tcp`), with one difference: **`listen` must be an
+absolute path** — there's no config file directory to sensibly resolve a
+relative one against here. `name` and `listen` must still be unique
+across every currently running bridge, config-defined or
+API-added — a conflict is a `409 Conflict` naming it, the same
+information a startup-time duplicate error gives you. A malformed or
+invalid request is `400 Bad Request`; removing a name that isn't running
+is `404 Not Found`.
+
+### Persistence: `managed-bridges.yaml`
+
+A bridge added through the API is persisted to
+`state_dir/managed-bridges.yaml` — a second file in exactly the same
+shape as `config.yaml`'s own `bridges:` list (it's genuinely just
+another file `tsbridge` sources bridge configuration from). On every
+startup, `tsbridge` loads `config.yaml`'s `bridges:` and
+`managed-bridges.yaml`'s together as one combined set, validated with
+the same duplicate-name/duplicate-listen rules as `config.yaml` alone —
+a conflict between the two is a fatal startup error naming which file
+each side came from. **`config.yaml` itself is never read back or
+rewritten** by the management API; only `managed-bridges.yaml` is.
+
+This gives each bridge an origin that decides what removing it does:
+
+- **Added through the API** (`managed-bridges.yaml`): `DELETE` stops it
+  and removes it from `managed-bridges.yaml`, so it stays gone across a
+  restart too.
+- **Defined in `config.yaml`**: `DELETE` stops it, but `config.yaml`
+  isn't touched — it comes back on the next restart unless you also
+  edit `config.yaml`. This lets you take a config-defined bridge down at
+  runtime (say, during an incident) without committing to removing it
+  permanently.
+
+`GET /bridges` includes a `source` field (`"config"` or `"managed"`) on
+every entry so you can tell which is which before removing one.
+
+### Failure isolation
+
+A bridge that hits a fatal, non-recoverable error (as opposed to a
+transient one like a temporary file-descriptor exhaustion, which is
+already retried with backoff) is removed from the running set and
+logged, but **no longer takes the rest of `tsbridge` down with it** —
+every other bridge, and the tailnet session itself, keeps running. This
+holds whether or not `management_socket` is configured. It's a
+deliberate change in behavior: previously, any one bridge's fatal error
+exited the whole process (so `systemd`'s `Restart=on-failure` would
+fire); now that bridges can be managed independently at runtime, one
+bridge's failure shouldn't take unrelated ones down too.
+
+A fatally-failed bridge is **not** removed from `managed-bridges.yaml`
+if it came from there — only an explicit `DELETE` does that — so a
+process restart gives it a fresh attempt rather than losing it for
+good. Check `GET /bridges` (or the logs) to see what's actually running
+versus what's configured.
+
 ## Install
 
 1. Build and install the binary:
@@ -329,9 +431,11 @@ the leaf socket files inside `/run/tsbridge`, which must already exist as
 a directory).
 
 To add, remove, or change a bridge later: edit `/etc/tsbridge/config.yaml`
-and `sudo systemctl restart tsbridge`. A *new* `socket_group` value — one
-`tsbridge` isn't already a member of — additionally needs a
-`tsbridge.service` edit (`SupplementaryGroups=`) and
+and `sudo systemctl restart tsbridge` — or, if `management_socket` is
+configured, add/remove bridges through its API with no restart at all
+(see [Runtime bridge management](#runtime-bridge-management)). A *new*
+`socket_group` value — one `tsbridge` isn't already a member of —
+additionally needs a `tsbridge.service` edit (`SupplementaryGroups=`) and
 `systemctl daemon-reload`, since group membership is a process-level
 grant that `config.yaml` alone can't extend.
 
@@ -388,6 +492,16 @@ slightly by `mode`:
   a clean drain on shutdown matters for it, use `mode: tcp` instead —
   the raw byte copy has no notion of "upgraded" to lose track of, so it
   drains like any other connection.
+
+The management socket (if configured) gets the same drain window and is
+unlinked the same way on shutdown, as an `http`-mode bridge would be —
+it's an HTTP server under the hood.
+
+This is process-wide shutdown, triggered only by a signal. A single
+bridge hitting a fatal error at runtime is a different, narrower event —
+see [Failure isolation](#failure-isolation) — and doesn't go through this
+drain-and-exit path at all: every other bridge and the process itself
+keep running.
 
 To verify manually:
 
@@ -546,8 +660,11 @@ path "..."`) rather than failing partway through startup.
 
 - No full `tailscaled`/TUN-based setup — `tsnet` only, userspace, no
   system network interface.
-- No hot-reload — config errors are always fail-fast at startup; restart
-  `tsbridge` to pick up config changes.
+- No hot-reload of `config.yaml` itself — config errors there are always
+  fail-fast at startup; restart `tsbridge` to pick up a `config.yaml`
+  edit. Bridges can still be added/removed live without a restart, just
+  not by editing `config.yaml` — see
+  [Runtime bridge management](#runtime-bridge-management).
 - No protocol awareness in `tcp` mode (the default) — it copies raw TCP
   bytes in both directions. `mode: http` is the one deliberate exception
   (see [HTTP mode](#http-mode-reverse-proxy)); anything else

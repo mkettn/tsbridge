@@ -52,11 +52,30 @@ type runningBridge interface {
 // (non-blocking) so the caller can shut the whole process down rather
 // than leaving a dead bridge silently bound but unserved.
 func startBridge(ctx context.Context, dial dialFunc, b BridgeConfig, sockMode os.FileMode, group string, fatal chan<- error) (runningBridge, error) {
-	if err := removeStaleSocket(b.Listen); err != nil {
+	l, err := createUnixSocket(b.Listen, sockMode, group)
+	if err != nil {
 		return nil, err
 	}
 
-	l, err := listenWithMode(b.Listen, sockMode)
+	switch b.Mode {
+	case "http":
+		return startHTTPBridge(ctx, dial, b, l, fatal), nil
+	default: // "tcp", the only other value checkBridges allows
+		return startTCPBridge(ctx, dial, b, l, fatal), nil
+	}
+}
+
+// createUnixSocket creates a Unix socket at path (removing any stale one
+// first) with the given permissions and, if group is non-empty, group
+// ownership. Shared by startBridge and the management socket (manage.go),
+// which need identical stale-socket handling and permission setup for
+// their own listener.
+func createUnixSocket(path string, mode os.FileMode, group string) (net.Listener, error) {
+	if err := removeStaleSocket(path); err != nil {
+		return nil, err
+	}
+
+	l, err := listenWithMode(path, mode)
 	if err != nil {
 		return nil, fmt.Errorf("listening on unix socket: %w", err)
 	}
@@ -65,7 +84,7 @@ func startBridge(ctx context.Context, dial dialFunc, b BridgeConfig, sockMode os
 	// umask, but chmod again as cheap defense-in-depth (e.g. in case the
 	// umask trick doesn't apply on some platform) -- this is a no-op in
 	// the common case, not a new permissive window.
-	if err := os.Chmod(b.Listen, sockMode); err != nil {
+	if err := os.Chmod(path, mode); err != nil {
 		l.Close()
 		return nil, fmt.Errorf("chmod socket: %w", err)
 	}
@@ -76,18 +95,13 @@ func startBridge(ctx context.Context, dial dialFunc, b BridgeConfig, sockMode os
 			l.Close()
 			return nil, fmt.Errorf("resolving socket_group %q: %w", group, err)
 		}
-		if err := os.Chown(b.Listen, -1, gid); err != nil {
+		if err := os.Chown(path, -1, gid); err != nil {
 			l.Close()
 			return nil, fmt.Errorf("chown socket to group %q: %w", group, err)
 		}
 	}
 
-	switch b.Mode {
-	case "http":
-		return startHTTPBridge(ctx, dial, b, l, fatal), nil
-	default: // "tcp", the only other value checkBridges allows
-		return startTCPBridge(ctx, dial, b, l, fatal), nil
-	}
+	return l, nil
 }
 
 // removeStaleSocket removes b.Listen only if it's genuinely a leftover
