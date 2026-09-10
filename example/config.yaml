@@ -15,7 +15,9 @@
 # they resolve against this file's own directory (example/) rather than
 # needing an absolute path -- see README.md's "Relative paths" section.
 # Caddyfile in this same directory serves the resulting socket on
-# localhost:1234.
+# localhost:1234, and the management socket below on localhost:1235
+# (API plus a small HTML UI at www/index.html) -- see README.md's
+# "Runtime bridge management" section.
 
 hostname: tsbridge-example
 
@@ -25,6 +27,14 @@ hostname: tsbridge-example
 # (see README.md's "Ephemeral vs. persistent identity").
 state_dir: state
 ephemeral: true
+
+# Relative -> example/tsbridge-example-control.sock (matches Caddyfile).
+# Lets you add/remove bridges without restarting tsbridge -- see
+# README.md's "Runtime bridge management" section. Defaults to mode
+# "0600" (owner-only), which is fine for this single-user example; a
+# real install should think about management_socket_group the same way
+# it thinks about socket_group.
+management_socket: tsbridge-example-control.sock
 
 bridges:
   - name: example-service

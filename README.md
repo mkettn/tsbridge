@@ -68,6 +68,13 @@ socket tsbridge created. This is the same shape as the
 [manual end-to-end test](#manual-end-to-end-test) below, just wired to a
 real tailnet target instead of a throwaway echo listener.
 
+`example/config.yaml` also sets `management_socket:`, and
+`example/Caddyfile` proxies it (plus a small HTML UI for it,
+`example/www/index.html`) on `localhost:1235` — open that in a browser
+to see the running `example-service` bridge and add/remove bridges live.
+See [Runtime bridge management](#runtime-bridge-management) below for
+what that API looks like and how bridges added through it persist.
+
 ## Registering the bridge node
 
 Pointing `tsbridge` at a control server is enough on its own — there is no

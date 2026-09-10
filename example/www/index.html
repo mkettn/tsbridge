@@ -1,0 +1,204 @@
+<!--
+  Small example UI for tsbridge's runtime management API (see
+  README.md's "Runtime bridge management" section): lists running
+  bridges and lets you add/remove them, talking to the API directly
+  from the browser with plain fetch() calls against relative URLs.
+
+  Served by Caddy (see ../Caddyfile) on http://localhost:1235, the same
+  origin Caddy reverse-proxies /bridges and /bridges/* to tsbridge's
+  management socket on -- so these fetch() calls need no CORS setup and
+  no hardcoded host/port. This file is the *only* thing under this
+  directory (example/www/), deliberately: Caddy's root for this site is
+  scoped to example/www/ rather than example/ itself, so a static file
+  server here can never accidentally serve config.yaml, state/ (which
+  holds this node's tsnet identity keys), or the bridge sockets.
+
+  tsbridge needs to be running first (pointed at ../config.yaml, which
+  sets management_socket) so that socket exists for Caddy to proxy to.
+-->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tsbridge bridges</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    max-width: 46rem;
+    margin: 2.5rem auto;
+    padding: 0 1.25rem;
+  }
+  h1 { font-size: 1.3rem; margin-bottom: .2rem; }
+  .sub { opacity: .65; margin-top: 0; font-size: .9rem; }
+  table { width: 100%; border-collapse: collapse; margin: 1.25rem 0; }
+  th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid currentColor; border-color: color-mix(in srgb, currentColor 15%, transparent); font-size: .88rem; vertical-align: top; }
+  th { font-weight: 600; opacity: .7; font-size: .78rem; text-transform: uppercase; letter-spacing: .02em; }
+  code { font-size: .85em; opacity: .85; }
+  .empty { opacity: .6; font-style: italic; }
+  .badge { display: inline-block; padding: .05rem .45rem; border-radius: 1rem; font-size: .75rem; border: 1px solid currentColor; opacity: .75; }
+  fieldset { border: 1px solid color-mix(in srgb, currentColor 20%, transparent); border-radius: .5rem; padding: 1rem 1.25rem 1.25rem; margin: 1.5rem 0; }
+  legend { font-size: .95rem; font-weight: 600; padding: 0 .4rem; }
+  form { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .75rem 1rem; align-items: end; }
+  label { display: block; font-size: .78rem; opacity: .75; margin-bottom: .25rem; }
+  input[type=text] { width: 100%; box-sizing: border-box; padding: .4rem .5rem; font: inherit; }
+  select { width: 100%; box-sizing: border-box; padding: .4rem .5rem; font: inherit; }
+  .checkbox-field { display: flex; align-items: center; gap: .4rem; padding-bottom: .35rem; }
+  .checkbox-field label { margin: 0; }
+  button { padding: .4rem .9rem; font: inherit; cursor: pointer; }
+  button.remove { color: #c0362c; border-color: currentColor; background: none; border-radius: .35rem; }
+  #error { color: #c0362c; white-space: pre-wrap; font-size: .88rem; margin: .75rem 0; }
+  #error:empty { display: none; }
+</style>
+</head>
+<body>
+<h1>tsbridge bridges</h1>
+<p class="sub">Talking to <code>/bridges</code> on this origin, proxied by Caddy to tsbridge's <code>management_socket</code>.</p>
+
+<div id="error"></div>
+
+<table>
+  <thead>
+    <tr><th>Name</th><th>Mode</th><th>Source</th><th>Listen</th><th>Target</th><th></th></tr>
+  </thead>
+  <tbody id="rows"><tr><td colspan="6" class="empty">loading&hellip;</td></tr></tbody>
+</table>
+
+<fieldset>
+  <legend>Add a bridge</legend>
+  <form id="add-form">
+    <div>
+      <label for="f-name">Name</label>
+      <input type="text" id="f-name" required placeholder="my-service" autocomplete="off">
+    </div>
+    <div>
+      <label for="f-listen">Listen (absolute path)</label>
+      <input type="text" id="f-listen" required placeholder="/run/tsbridge/my-service.sock" autocomplete="off">
+    </div>
+    <div>
+      <label for="f-target">Target (host:port)</label>
+      <input type="text" id="f-target" required placeholder="remote-machine:1234" autocomplete="off">
+    </div>
+    <div>
+      <label for="f-mode">Mode</label>
+      <select id="f-mode">
+        <option value="tcp">tcp</option>
+        <option value="http">http</option>
+      </select>
+    </div>
+    <div class="checkbox-field">
+      <input type="checkbox" id="f-rewrite-host">
+      <label for="f-rewrite-host">rewrite_host (http only)</label>
+    </div>
+    <div>
+      <button type="submit">Add bridge</button>
+    </div>
+  </form>
+</fieldset>
+
+<script>
+"use strict";
+
+const rowsEl = document.getElementById("rows");
+const errorEl = document.getElementById("error");
+const form = document.getElementById("add-form");
+
+function showError(message) {
+  errorEl.textContent = message;
+}
+
+// messageFromResponse reads the management API's {"error": "..."} JSON
+// body (see manage.go's writeError) for a non-2xx response, falling
+// back to the plain status line if the body isn't JSON for some reason.
+async function messageFromResponse(res) {
+  try {
+    const data = await res.clone().json();
+    if (data && typeof data.error === "string") return data.error;
+  } catch {
+    // fall through to the status line below
+  }
+  return `${res.status} ${res.statusText}`;
+}
+
+function el(tag, props, children) {
+  const node = document.createElement(tag);
+  Object.assign(node, props);
+  for (const child of children || []) node.append(child);
+  return node;
+}
+
+function renderRow(bridge) {
+  const removeBtn = el("button", {
+    className: "remove",
+    textContent: "Remove",
+    onclick: () => removeBridge(bridge.name),
+  });
+  return el("tr", {}, [
+    el("td", {}, [el("code", { textContent: bridge.name })]),
+    el("td", { textContent: bridge.mode + (bridge.mode === "http" && bridge.rewrite_host ? " (rewrite_host)" : "") }),
+    el("td", {}, [el("span", { className: "badge", textContent: bridge.source })]),
+    el("td", {}, [el("code", { textContent: bridge.listen })]),
+    el("td", {}, [el("code", { textContent: bridge.target })]),
+    el("td", {}, [removeBtn]),
+  ]);
+}
+
+async function refresh() {
+  let bridges;
+  try {
+    const res = await fetch("/bridges");
+    if (!res.ok) throw new Error(`listing bridges: ${await messageFromResponse(res)}`);
+    bridges = await res.json();
+  } catch (err) {
+    showError(String(err.message || err));
+    return;
+  }
+  showError("");
+
+  rowsEl.replaceChildren();
+  if (!bridges || bridges.length === 0) {
+    rowsEl.append(el("tr", {}, [el("td", { colSpan: 6, className: "empty", textContent: "no bridges running" })]));
+    return;
+  }
+  bridges.sort((a, b) => a.name.localeCompare(b.name));
+  for (const bridge of bridges) rowsEl.append(renderRow(bridge));
+}
+
+async function removeBridge(name) {
+  try {
+    const res = await fetch(`/bridges/${encodeURIComponent(name)}`, { method: "DELETE" });
+    if (!res.ok) throw new Error(`removing ${name}: ${await messageFromResponse(res)}`);
+  } catch (err) {
+    showError(String(err.message || err));
+  }
+  refresh();
+}
+
+form.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const body = {
+    name: document.getElementById("f-name").value.trim(),
+    listen: document.getElementById("f-listen").value.trim(),
+    target: document.getElementById("f-target").value.trim(),
+    mode: document.getElementById("f-mode").value,
+    rewrite_host: document.getElementById("f-rewrite-host").checked,
+  };
+  try {
+    const res = await fetch("/bridges", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`adding ${body.name || "bridge"}: ${await messageFromResponse(res)}`);
+    form.reset();
+  } catch (err) {
+    showError(String(err.message || err));
+  }
+  refresh();
+});
+
+refresh();
+</script>
+</body>
+</html>
