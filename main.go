@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sync"
 	"syscall"
 	"time"
 
@@ -94,7 +93,7 @@ func run() error {
 	if cfg.StateDir != "" {
 		statePath = filepath.Join(cfg.StateDir, managedBridgesFileName)
 	}
-	manager := newBridgeManager(ctx, srv.Dial, cfg.SocketMode, cfg.SocketGroup, statePath)
+	manager := newBridgeManager(ctx, srv.Dial, cfg.SocketMode, cfg.SocketGroup, statePath, cfg.ManagementSocket)
 	started, attempted, err := manager.startAll(cfg.Bridges)
 	if err != nil {
 		return err
@@ -129,20 +128,20 @@ func run() error {
 
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownDrainTimeout)
 	defer cancelShutdown()
-	var shutdownWG sync.WaitGroup
-	shutdownWG.Add(1)
-	go func() {
-		defer shutdownWG.Done()
-		manager.Shutdown(shutdownCtx)
-	}()
+	// The management socket is shut down first, and fully -- not
+	// concurrently with the bridges -- so no new POST/DELETE can be
+	// accepted (or still be in a handler) once bridges start being torn
+	// down. http.Server.Shutdown already blocks until in-flight
+	// requests finish and no new ones are accepted, so this ordering
+	// alone is enough: a request that raced a concurrent shutdown could
+	// otherwise start a new bridge after manager.Shutdown had already
+	// taken its snapshot of what to persist, and have that bridge's own
+	// Add rewrite managed-bridges.yaml with only itself in it, wiping
+	// every other managed bridge from the file.
 	if mgmt != nil {
-		shutdownWG.Add(1)
-		go func() {
-			defer shutdownWG.Done()
-			mgmt.Shutdown(shutdownCtx)
-		}()
+		mgmt.Shutdown(shutdownCtx)
 	}
-	shutdownWG.Wait()
+	manager.Shutdown(shutdownCtx)
 
 	log.Println("shutdown complete")
 	return nil

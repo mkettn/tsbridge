@@ -124,6 +124,15 @@ func LoadConfig(path string) (*Config, error) {
 			if err != nil {
 				return nil, fmt.Errorf("management_socket_mode: %w", err)
 			}
+		} else if raw.ManagementSocketGroup != "" {
+			// The default mode is owner-only (0600), which grants the
+			// group nothing -- so management_socket_group alone would
+			// silently do nothing: the socket gets chowned to that
+			// group, but its permission bits still don't let the group
+			// use it. socket_group doesn't have this problem since its
+			// own default (0660) already grants the group access.
+			return nil, fmt.Errorf("management_socket_group is set but management_socket_mode is not: "+
+				"the default %#o gives the group no access -- set a mode that does, e.g. \"0660\"", defaultManagementSocketMode)
 		}
 		if stateDir == "" {
 			return nil, fmt.Errorf("management_socket requires state_dir to be set -- it's where managed bridges (%s) are persisted", managedBridgesFileName)
@@ -135,6 +144,8 @@ func LoadConfig(path string) (*Config, error) {
 		}
 	} else if raw.ManagementSocketMode != "" {
 		return nil, fmt.Errorf("management_socket_mode is set but management_socket is empty")
+	} else if raw.ManagementSocketGroup != "" {
+		return nil, fmt.Errorf("management_socket_group is set but management_socket is empty")
 	}
 
 	if raw.ControlURL != "" {

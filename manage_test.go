@@ -23,7 +23,22 @@ func newTestManager(t *testing.T) (*bridgeManager, string) {
 	statePath := filepath.Join(dir, managedBridgesFileName)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	return newBridgeManager(ctx, failDial, 0660, "", statePath), dir
+	return newBridgeManager(ctx, failDial, 0660, "", statePath, ""), dir
+}
+
+// blockingBridge is a runningBridge whose Shutdown blocks until release is
+// closed, standing in for a real bridge with a slow drain -- lets tests
+// exercise bridgeManager's locking around a long-running Shutdown without
+// an actual multi-second sleep.
+type blockingBridge struct {
+	release chan struct{}
+}
+
+func (b *blockingBridge) Shutdown(ctx context.Context) {
+	select {
+	case <-b.release:
+	case <-ctx.Done():
+	}
 }
 
 func TestBridgeManager_AddListGetRemove(t *testing.T) {
@@ -149,10 +164,15 @@ func newTestManagerWithState(t *testing.T, statePath string) (*bridgeManager, st
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	return newBridgeManager(ctx, failDial, 0660, "", statePath), filepath.Dir(statePath)
+	return newBridgeManager(ctx, failDial, 0660, "", statePath, ""), filepath.Dir(statePath)
 }
 
-func TestBridgeManager_StartAllValidatesCombinedConfigAndManagedBridges(t *testing.T) {
+// A managed-bridges.yaml entry that collides with a config.yaml one is
+// skipped (logged), not a fatal startup error -- unlike config.yaml
+// itself, that file can drift or be hand-edited, so one bad entry in it
+// shouldn't take every other bridge down. config.yaml's own bridges:
+// list is still fully fatal-validated, unchanged.
+func TestBridgeManager_StartAllSkipsManagedBridgeCollidingWithConfig(t *testing.T) {
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, managedBridgesFileName)
 	managedYAML := "bridges:\n  - name: dup\n    listen: " + filepath.Join(dir, "dup.sock") + "\n    target: t:1\n    mode: tcp\n"
@@ -162,9 +182,35 @@ func TestBridgeManager_StartAllValidatesCombinedConfigAndManagedBridges(t *testi
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	m := newBridgeManager(ctx, failDial, 0660, "", statePath)
+	m := newBridgeManager(ctx, failDial, 0660, "", statePath, "")
 
 	static := []BridgeConfig{{Name: "dup", Listen: filepath.Join(dir, "other.sock"), Target: "t:2", Mode: "tcp"}}
+	started, attempted, err := m.startAll(static)
+	if err != nil {
+		t.Fatalf("startAll: %v", err)
+	}
+	if started != 1 || attempted != 1 {
+		t.Fatalf("want the config-sourced bridge to start and the colliding managed one to be skipped, got %d/%d", started, attempted)
+	}
+	list := m.List()
+	if len(list) != 1 || list[0].Name != "dup" || list[0].Source != "config" || list[0].Target != "t:2" {
+		t.Fatalf("want only the config-sourced bridge running, got: %+v", list)
+	}
+}
+
+// config.yaml's own bridges: list stays fully fatal-validated -- a
+// duplicate within it, with no managed-bridges.yaml involved at all, is
+// still a startup error naming the conflict.
+func TestBridgeManager_StartAllStillFatalOnDuplicateWithinConfig(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := newBridgeManager(ctx, failDial, 0660, "", filepath.Join(dir, managedBridgesFileName), "")
+
+	static := []BridgeConfig{
+		{Name: "dup", Listen: filepath.Join(dir, "a.sock"), Target: "t:1", Mode: "tcp"},
+		{Name: "dup", Listen: filepath.Join(dir, "b.sock"), Target: "t:2", Mode: "tcp"},
+	}
 	_, _, err := m.startAll(static)
 	if err == nil || !strings.Contains(err.Error(), "duplicate bridge name") {
 		t.Fatalf("want duplicate-name error naming the conflict, got: %v", err)
@@ -176,7 +222,7 @@ func TestBridgeManager_RemoveConfigSourcedBridgeLeavesStateFileUntouched(t *test
 	statePath := filepath.Join(dir, managedBridgesFileName)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	m := newBridgeManager(ctx, failDial, 0660, "", statePath)
+	m := newBridgeManager(ctx, failDial, 0660, "", statePath, "")
 
 	static := []BridgeConfig{{Name: "static-a", Listen: filepath.Join(dir, "static.sock"), Target: "t:1", Mode: "tcp"}}
 	if _, _, err := m.startAll(static); err != nil {
@@ -207,29 +253,34 @@ func TestBridgeManager_RemoveConfigSourcedBridgeLeavesStateFileUntouched(t *test
 	}
 }
 
-func TestBridgeManager_FatalRemovesFromRegistryButNotFromStateFile(t *testing.T) {
+// A fatal error marks the entry not-running (with the error recorded) but
+// leaves it in the registry -- unlike the old behavior, which deleted it
+// outright, that meant it silently vanished from managed-bridges.yaml the
+// next time anything else changed (see the next test).
+func TestBridgeManager_FatalMarksDeadButKeepsEntry(t *testing.T) {
 	m, dir := newTestManager(t)
 	sockPath := filepath.Join(dir, "svc.sock")
 	cfg := BridgeConfig{Name: "svc", Listen: sockPath, Target: "example.invalid:1", Mode: "tcp"}
 
-	// Start the bridge and register it exactly like startLocked/Add would,
-	// but keep our own handle on fatalCh so the test can trigger it --
-	// simulating a real fatal accept/serve error without needing to
-	// engineer one out of a real listener.
+	// Start the bridge and register it exactly like startLocked/Add
+	// would, but keep our own handle on fatalCh so the test can trigger
+	// it -- simulating a real fatal accept/serve error without needing
+	// to engineer one out of a real listener.
 	fatalCh := make(chan error, 1)
 	rb, err := startBridge(m.ctx, m.dial, cfg, m.sockMode, m.group, fatalCh)
 	if err != nil {
 		t.Fatalf("startBridge: %v", err)
 	}
 	done := make(chan struct{})
+	entry := &managedEntry{cfg: cfg, rb: rb, source: "managed", fatalDone: done}
 	m.mu.Lock()
-	m.entries["svc"] = &managedEntry{cfg: cfg, rb: rb, source: "managed", fatalDone: done}
+	m.entries["svc"] = entry
 	if err := m.saveLocked(); err != nil {
 		m.mu.Unlock()
 		t.Fatalf("saveLocked: %v", err)
 	}
 	m.mu.Unlock()
-	go m.watchFatal("svc", fatalCh, done)
+	go m.watchFatal(entry, fatalCh, done)
 
 	before, err := os.ReadFile(m.statePath)
 	if err != nil {
@@ -238,12 +289,14 @@ func TestBridgeManager_FatalRemovesFromRegistryButNotFromStateFile(t *testing.T)
 
 	fatalCh <- errors.New("simulated fatal error")
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && len(m.List()) != 0 {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if len(m.List()) != 0 {
-		t.Fatalf("want bridge removed from registry after fatal, still present: %+v", m.List())
+	waitFor(t, func() bool {
+		list := m.List()
+		return len(list) == 1 && !list[0].Running
+	})
+
+	list := m.List()
+	if len(list) != 1 || list[0].Name != "svc" || list[0].Running || list[0].Error == "" {
+		t.Fatalf("want svc still listed, not running, with an error message: %+v", list)
 	}
 
 	after, err := os.ReadFile(m.statePath)
@@ -254,13 +307,135 @@ func TestBridgeManager_FatalRemovesFromRegistryButNotFromStateFile(t *testing.T)
 		t.Errorf("a fatal error rewrote the managed state file:\nbefore:\n%s\nafter:\n%s", before, after)
 	}
 
-	// watchFatal only drops the registry entry; it doesn't call
-	// rb.Shutdown (mirroring a genuinely fatal bridge, which closes its
-	// own listener before ever writing to the fatal channel). Clean up
-	// directly so the test doesn't leak the socket.
+	// watchFatal only marks the entry dead; it doesn't call rb.Shutdown
+	// (mirroring a genuinely fatal bridge, which closes its own listener
+	// before ever writing to the fatal channel). Clean up directly so
+	// the test doesn't leak the socket.
 	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	rb.Shutdown(shutCtx)
+}
+
+// The bug TestBridgeManager_FatalMarksDeadButKeepsEntry guards against:
+// with the old delete-on-fatal behavior, a dead managed bridge would
+// vanish from managed-bridges.yaml the moment anything *else* changed,
+// since saveLocked rebuilds the file from the live registry. It should
+// survive an unrelated write untouched.
+func TestBridgeManager_DeadManagedBridgeSurvivesUnrelatedWrite(t *testing.T) {
+	m, dir := newTestManager(t)
+
+	deadCfg := BridgeConfig{Name: "dead", Listen: filepath.Join(dir, "dead.sock"), Target: "t:1", Mode: "tcp"}
+	fatalCh := make(chan error, 1)
+	rb, err := startBridge(m.ctx, m.dial, deadCfg, m.sockMode, m.group, fatalCh)
+	if err != nil {
+		t.Fatalf("startBridge: %v", err)
+	}
+	done := make(chan struct{})
+	entry := &managedEntry{cfg: deadCfg, rb: rb, source: "managed", fatalDone: done}
+	m.mu.Lock()
+	m.entries["dead"] = entry
+	if err := m.saveLocked(); err != nil {
+		m.mu.Unlock()
+		t.Fatalf("saveLocked: %v", err)
+	}
+	m.mu.Unlock()
+	go m.watchFatal(entry, fatalCh, done)
+	fatalCh <- errors.New("simulated fatal error")
+	waitFor(t, func() bool {
+		list := m.List()
+		return len(list) == 1 && !list[0].Running
+	})
+
+	// An unrelated Add, followed by its own Remove, each rewrite the
+	// state file via saveLocked -- "dead" must survive both.
+	if _, err := m.Add(BridgeConfig{Name: "other", Listen: filepath.Join(dir, "other.sock"), Target: "t:2"}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if err := m.Remove("other"); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	data, err := os.ReadFile(m.statePath)
+	if err != nil {
+		t.Fatalf("reading state file: %v", err)
+	}
+	if !strings.Contains(string(data), "name: dead") {
+		t.Fatalf("dead bridge was dropped from the state file by an unrelated write:\n%s", data)
+	}
+
+	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	rb.Shutdown(shutCtx)
+}
+
+// The bug this guards against: watchFatal used to key on name alone. A
+// Remove immediately followed by an Add of the same name (very plausible
+// as an operator's "replace this bridge" workflow) would let the *old*
+// bridge's fatal signal -- e.g. its listener closing during Shutdown,
+// before the ctx-cancellation fix in bridge.go -- delete whatever the new
+// entry with that name now is, even though it's a different, healthy
+// bridge. watchFatal now compares entry identity, not just the name.
+func TestBridgeManager_WatchFatalIgnoresStaleSignalAfterNameReuse(t *testing.T) {
+	m, _ := newTestManager(t)
+
+	oldFatalCh := make(chan error, 1)
+	oldEntry := &managedEntry{
+		cfg:       BridgeConfig{Name: "svc", Listen: "/old.sock", Target: "t:1", Mode: "tcp"},
+		rb:        &blockingBridge{release: make(chan struct{})},
+		source:    "managed",
+		fatalDone: make(chan struct{}),
+	}
+	m.mu.Lock()
+	m.entries["svc"] = oldEntry
+	m.mu.Unlock()
+	go m.watchFatal(oldEntry, oldFatalCh, oldEntry.fatalDone)
+
+	// Simulate a Remove-then-Add cycle of the same name racing ahead of
+	// the old watcher: a brand new, healthy entry now owns "svc" in the
+	// registry, without oldEntry.fatalDone having been closed yet (the
+	// exact window the identity check has to handle).
+	newEntry := &managedEntry{
+		cfg:       BridgeConfig{Name: "svc", Listen: "/new.sock", Target: "t:2", Mode: "tcp"},
+		rb:        &blockingBridge{release: make(chan struct{})},
+		source:    "managed",
+		fatalDone: make(chan struct{}),
+	}
+	m.mu.Lock()
+	m.entries["svc"] = newEntry
+	m.mu.Unlock()
+
+	// The old bridge's fatal error arrives late.
+	oldFatalCh <- errors.New("stale fatal from the old bridge")
+
+	// Give the stale watcher goroutine a chance to (wrongly) act.
+	time.Sleep(100 * time.Millisecond)
+
+	m.mu.Lock()
+	cur := m.entries["svc"]
+	m.mu.Unlock()
+	if cur != newEntry {
+		t.Fatalf("a stale fatal signal for the old entry clobbered the new one: %+v", cur)
+	}
+	if cur.rb == nil {
+		t.Fatal("new entry was incorrectly marked dead by the old bridge's stale fatal signal")
+	}
+}
+
+// waitFor polls cond until it's true or 2 seconds pass, failing the test
+// on timeout. Used for assertions that depend on a background goroutine
+// (watchFatal) having run.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !cond() {
+		t.Fatal("condition was never met within 2s")
+	}
 }
 
 func TestManagementHandler_ListAddGetDelete(t *testing.T) {
@@ -345,7 +520,7 @@ func TestStartManagementServer_ServesOverUnixSocket(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	m := newBridgeManager(ctx, failDial, 0660, "", filepath.Join(dir, managedBridgesFileName))
+	m := newBridgeManager(ctx, failDial, 0660, "", filepath.Join(dir, managedBridgesFileName), sockPath)
 	rb, err := startManagementServer(sockPath, 0600, "", m)
 	if err != nil {
 		t.Fatalf("startManagementServer: %v", err)
@@ -408,5 +583,149 @@ func TestAtomicWriteFile_ReplacesExistingContent(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0600 {
 		t.Errorf("want mode 0600, got %v", info.Mode().Perm())
+	}
+}
+
+// Remove used to hold m.mu for its whole call, including the (up to
+// shutdownDrainTimeout) wait for the bridge's in-flight connections to
+// finish draining -- so removing one slow bridge would block every other
+// request (List, Add, another Remove) for as long as the drain took.
+// Remove now unregisters and persists under the lock, then drains
+// outside it.
+func TestBridgeManager_RemoveDoesNotBlockOtherCallsDuringDrain(t *testing.T) {
+	m, dir := newTestManager(t)
+
+	release := make(chan struct{})
+	entry := &managedEntry{
+		cfg:       BridgeConfig{Name: "slow", Listen: filepath.Join(dir, "slow.sock"), Target: "t:1", Mode: "tcp"},
+		rb:        &blockingBridge{release: release},
+		source:    "managed",
+		fatalDone: make(chan struct{}),
+	}
+	m.mu.Lock()
+	m.entries["slow"] = entry
+	if err := m.saveLocked(); err != nil {
+		m.mu.Unlock()
+		t.Fatalf("saveLocked: %v", err)
+	}
+	m.mu.Unlock()
+
+	removeDone := make(chan struct{})
+	go func() {
+		defer close(removeDone)
+		if err := m.Remove("slow"); err != nil {
+			t.Errorf("Remove: %v", err)
+		}
+	}()
+
+	// Give Remove a moment to start (and, pre-fix, to be holding m.mu
+	// for the whole drain).
+	time.Sleep(50 * time.Millisecond)
+
+	otherDone := make(chan struct{})
+	go func() {
+		defer close(otherDone)
+		m.List()
+		if _, err := m.Add(BridgeConfig{Name: "other", Listen: filepath.Join(dir, "other.sock"), Target: "t:2"}); err != nil {
+			t.Errorf("Add while slow Remove was draining: %v", err)
+		}
+	}()
+
+	select {
+	case <-otherDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("List/Add blocked while Remove was draining a slow bridge")
+	}
+
+	close(release) // let the slow bridge's Shutdown, and Remove, finish
+	select {
+	case <-removeDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Remove never returned after its bridge finished draining")
+	}
+}
+
+// Neither Add nor a reloaded managed-bridges.yaml entry may claim the
+// management socket's own listen path.
+func TestBridgeManager_AddRejectsManagementSocketPath(t *testing.T) {
+	dir := t.TempDir()
+	mgmtSock := filepath.Join(dir, "control.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := newBridgeManager(ctx, failDial, 0660, "", filepath.Join(dir, managedBridgesFileName), mgmtSock)
+
+	_, err := m.Add(BridgeConfig{Name: "svc", Listen: mgmtSock, Target: "t:1"})
+	if err == nil || !strings.Contains(err.Error(), "management socket") {
+		t.Fatalf("want error naming the management socket collision, got: %v", err)
+	}
+}
+
+func TestBridgeManager_StartAllSkipsManagedEntryCollidingWithManagementSocket(t *testing.T) {
+	dir := t.TempDir()
+	mgmtSock := filepath.Join(dir, "control.sock")
+	statePath := filepath.Join(dir, managedBridgesFileName)
+	managedYAML := "bridges:\n  - name: svc\n    listen: " + mgmtSock + "\n    target: t:1\n"
+	if err := os.WriteFile(statePath, []byte(managedYAML), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := newBridgeManager(ctx, failDial, 0660, "", statePath, mgmtSock)
+
+	started, attempted, err := m.startAll(nil)
+	if err != nil {
+		t.Fatalf("startAll: %v", err)
+	}
+	if started != 0 || attempted != 0 {
+		t.Fatalf("want the colliding managed entry skipped entirely, got %d/%d", started, attempted)
+	}
+	if len(m.List()) != 0 {
+		t.Fatalf("want nothing running, got: %+v", m.List())
+	}
+}
+
+// Entries loaded from managed-bridges.yaml go through the same
+// normalization LoadConfig applies to config.yaml's bridges: (mode
+// lowercased/defaulted) before validation -- a hand-edited file that
+// omits mode:, legal in config.yaml, must be legal here too rather than
+// tripping validateBridgeFields' unsupported-mode check on empty and, pre-fix,
+// taking the whole startup down over it. A genuinely invalid entry (bad
+// mode, or a relative listen path -- never valid here, since there's no
+// config file directory to resolve one against) is instead skipped with
+// a log, and doesn't stop the rest of the file from starting.
+func TestBridgeManager_StartAllNormalizesAndToleratesBadManagedEntries(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, managedBridgesFileName)
+	managedYAML := `bridges:
+  - name: good
+    listen: ` + filepath.Join(dir, "good.sock") + `
+    target: t:1
+  - name: bad-mode
+    listen: ` + filepath.Join(dir, "bad.sock") + `
+    target: t:2
+    mode: udp
+  - name: relative-listen
+    listen: relative.sock
+    target: t:3
+`
+	if err := os.WriteFile(statePath, []byte(managedYAML), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := newBridgeManager(ctx, failDial, 0660, "", statePath, "")
+
+	started, attempted, err := m.startAll(nil)
+	if err != nil {
+		t.Fatalf("startAll: %v", err)
+	}
+	if started != 1 || attempted != 1 {
+		t.Fatalf("want only the one valid entry started, got %d/%d", started, attempted)
+	}
+	list := m.List()
+	if len(list) != 1 || list[0].Name != "good" || list[0].Mode != "tcp" {
+		t.Fatalf("want good (with mode: defaulted to tcp) running, got: %+v", list)
 	}
 }

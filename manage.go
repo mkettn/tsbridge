@@ -66,10 +66,11 @@ func notFoundErr(format string, a ...any) error {
 	return &apiError{http.StatusNotFound, fmt.Sprintf(format, a...)}
 }
 
-// bridgeInfo is the management API's JSON view of a running bridge --
-// BridgeConfig plus Source, which has no place in a bridges: list itself
-// (config.yaml and managed-bridges.yaml don't tag their own entries;
-// bridgeManager does, based on which file/request a bridge came from).
+// bridgeInfo is the management API's JSON view of a bridge -- BridgeConfig
+// plus Source (which has no place in a bridges: list itself: config.yaml
+// and managed-bridges.yaml don't tag their own entries, bridgeManager
+// does) and Running/Error, reporting a bridge that failed to start or
+// died of a fatal error without erasing it from the registry.
 type bridgeInfo struct {
 	Name        string `json:"name"`
 	Listen      string `json:"listen"`
@@ -80,76 +81,139 @@ type bridgeInfo struct {
 	// startup) or "managed" (added through this API, or loaded from
 	// managed-bridges.yaml at startup).
 	Source string `json:"source"`
+	// Running is false if this bridge failed to start, or started and
+	// later hit a fatal error; Error then explains why.
+	Running bool   `json:"running"`
+	Error   string `json:"error,omitempty"`
 }
 
-// managedEntry is one bridge in bridgeManager's live registry.
+// managedEntry is one bridge in bridgeManager's registry -- including a
+// bridge that isn't currently running (rb == nil): either it failed to
+// start, or it started and later hit a fatal error. It stays in the
+// registry either way rather than being deleted, so managed-bridges.yaml
+// (which saveLocked rebuilds from source == "managed" entries in the
+// registry, regardless of rb) doesn't lose it on the next unrelated
+// write, and so GET /bridges can still report it and why it's down.
+// Remove is the only thing that ever deletes an entry.
 type managedEntry struct {
 	cfg    BridgeConfig
-	rb     runningBridge
-	source string // "config" or "managed"
-	// fatalDone is closed by Remove/Shutdown when this entry is
-	// deliberately stopped, so its watchFatal goroutine (below) can stop
-	// waiting on a fatal error that will now never come.
+	rb     runningBridge // nil if not currently running
+	source string        // "config" or "managed"
+	// lastError explains why rb is nil, when that's due to a failure
+	// (starting it, or a later fatal error) rather than never having
+	// been attempted.
+	lastError error
+	// fatalDone is non-nil only while rb is non-nil: closed by
+	// Remove/Shutdown when this entry is deliberately stopped, so its
+	// watchFatal goroutine (below) can stop waiting on a fatal error
+	// that will now never come.
 	fatalDone chan struct{}
 }
 
-// bridgeManager owns every running bridge -- both the ones config.yaml
-// started at boot and the ones added since through the management API --
-// and the managed-bridges.yaml file that persists the latter.
+// bridgeManager owns every bridge tsbridge runs -- both the ones
+// config.yaml started at boot and the ones added since through the
+// management API -- and the managed-bridges.yaml file that persists the
+// latter.
 type bridgeManager struct {
 	ctx       context.Context
 	dial      dialFunc
 	sockMode  os.FileMode
 	group     string
 	statePath string // state_dir/managed-bridges.yaml; "" if state_dir is unset
+	// managementSocket is the management socket's own listen path, if
+	// any ("" if management_socket is unset). No bridge -- config,
+	// managed, or added through the API -- may claim it as its own
+	// Listen path; see startAll and Add.
+	managementSocket string
 
 	mu      sync.Mutex
 	entries map[string]*managedEntry
 }
 
-func newBridgeManager(ctx context.Context, dial dialFunc, sockMode os.FileMode, group, statePath string) *bridgeManager {
+func newBridgeManager(ctx context.Context, dial dialFunc, sockMode os.FileMode, group, statePath, managementSocket string) *bridgeManager {
 	return &bridgeManager{
-		ctx:       ctx,
-		dial:      dial,
-		sockMode:  sockMode,
-		group:     group,
-		statePath: statePath,
-		entries:   make(map[string]*managedEntry),
+		ctx:              ctx,
+		dial:             dial,
+		sockMode:         sockMode,
+		group:            group,
+		statePath:        statePath,
+		managementSocket: managementSocket,
+		entries:          make(map[string]*managedEntry),
 	}
 }
 
-// startAll loads managed-bridges.yaml (if statePath is set), validates it
-// together with staticBridges (config.yaml's list) as one combined set --
-// same duplicate-name/listen rules as config.yaml alone -- and starts
-// every bridge in it. A validation failure here is fatal to startup, the
-// same as a bad config.yaml today. A bridge that fails to *start* (a bad
-// listen path, e.g.) is logged and skipped rather than failing startup,
-// matching the existing per-bridge tolerance.
+// startAll validates and starts staticBridges (config.yaml's list) --
+// same as today: a validation failure here is fatal to startup, the same
+// as a bad config.yaml has always been. It then loads managed-bridges.yaml
+// (if statePath is set) and starts what's valid in it too, but more
+// tolerantly: unlike config.yaml, that file can be hand-edited or drift
+// from what this binary's Add wrote, so a single malformed or duplicate
+// entry in it is logged and skipped rather than failing startup outright
+// -- one bad managed entry shouldn't take every other bridge down with
+// it, consistent with the failure-isolation this manager provides at
+// runtime too. Every managed entry is also normalized (mode
+// lowercased/defaulted) the same way config.yaml's are, since a
+// hand-edited file won't have gone through that step already, and
+// checked against an absolute Listen path and the management socket's
+// own path, matching Add's rules for a bridge submitted through the API.
 //
-// It returns how many bridges are running against how many were
+// A bridge that fails to *start* (a bad listen path, e.g.) is also
+// logged and skipped rather than failing startup, matching the existing
+// per-bridge tolerance -- but stays in the registry as a non-running
+// entry (see managedEntry) rather than vanishing, so it's visible via
+// GET /bridges and, if it's "managed", isn't dropped from
+// managed-bridges.yaml by a later unrelated write.
+//
+// It returns how many bridges ended up running against how many were
 // attempted, so main can decide whether "zero running" is fatal.
 func (m *bridgeManager) startAll(staticBridges []BridgeConfig) (started, attempted int, err error) {
+	if err := checkBridges(staticBridges); err != nil {
+		return 0, 0, err
+	}
+
 	managed, err := loadManagedBridges(m.statePath)
 	if err != nil {
 		return 0, 0, fmt.Errorf("loading %s: %w", m.statePath, err)
 	}
 
-	all := make([]BridgeConfig, 0, len(staticBridges)+len(managed))
-	all = append(all, staticBridges...)
-	all = append(all, managed...)
-	if err := checkBridges(all); err != nil {
-		return 0, 0, fmt.Errorf("validating bridges (config.yaml + %s): %w", m.statePath, err)
-	}
-
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	names := map[string]bool{}
+	listens := map[string]bool{}
 	for _, b := range staticBridges {
+		names[b.Name] = true
+		listens[b.Listen] = true
 		if m.startLocked(b, "config") {
 			started++
 		}
 		attempted++
 	}
+
 	for _, b := range managed {
+		normalizeBridgeMode(&b)
+		if err := validateBridgeFields(b); err != nil {
+			log.Printf("management: skipping invalid entry in %s: %v", m.statePath, err)
+			continue
+		}
+		if !filepath.IsAbs(b.Listen) {
+			log.Printf("management: skipping %q in %s: listen path must be absolute (got %q)", b.Name, m.statePath, b.Listen)
+			continue
+		}
+		if b.Listen == m.managementSocket {
+			log.Printf("management: skipping %q in %s: listen path %q collides with management_socket", b.Name, m.statePath, b.Listen)
+			continue
+		}
+		if names[b.Name] {
+			log.Printf("management: skipping %q in %s: duplicate bridge name", b.Name, m.statePath)
+			continue
+		}
+		if listens[b.Listen] {
+			log.Printf("management: skipping %q in %s: duplicate listen path %q", b.Name, m.statePath, b.Listen)
+			continue
+		}
+		names[b.Name] = true
+		listens[b.Listen] = true
 		if m.startLocked(b, "managed") {
 			started++
 		}
@@ -158,7 +222,9 @@ func (m *bridgeManager) startAll(staticBridges []BridgeConfig) (started, attempt
 	return started, attempted, nil
 }
 
-// startLocked starts cfg and, on success, registers it under source.
+// startLocked starts cfg and registers it under source either way:
+// running (rb set) on success, or non-running with lastError set on
+// failure -- see managedEntry for why a failed one still gets an entry.
 // Callers must hold m.mu. Reports success via return value rather than
 // error: a failed bridge is logged and skipped, never fatal here (see
 // startAll and Add for why each caller treats that differently).
@@ -167,26 +233,39 @@ func (m *bridgeManager) startLocked(cfg BridgeConfig, source string) bool {
 	rb, err := startBridge(m.ctx, m.dial, cfg, m.sockMode, m.group, fatalCh)
 	if err != nil {
 		log.Printf("bridge %s: failed to start, skipping: %v", cfg.Name, err)
+		m.entries[cfg.Name] = &managedEntry{cfg: cfg, source: source, lastError: err}
 		return false
 	}
 	done := make(chan struct{})
-	m.entries[cfg.Name] = &managedEntry{cfg: cfg, rb: rb, source: source, fatalDone: done}
-	go m.watchFatal(cfg.Name, fatalCh, done)
+	entry := &managedEntry{cfg: cfg, rb: rb, source: source, fatalDone: done}
+	m.entries[cfg.Name] = entry
+	go m.watchFatal(entry, fatalCh, done)
 	return true
 }
 
-// watchFatal removes name from the registry if it ever reports a fatal
-// error, without touching managed-bridges.yaml (see the package doc
-// comment). It exits without doing anything if done closes first, which
-// means the entry was already removed deliberately (Remove, or process
-// shutdown).
-func (m *bridgeManager) watchFatal(name string, fatalCh <-chan error, done <-chan struct{}) {
+// watchFatal marks entry as no longer running if it ever reports a fatal
+// error -- clearing rb and recording err in lastError, but leaving the
+// entry itself in the registry (see managedEntry) rather than deleting
+// it, so it stays visible and, if "managed", stays in
+// managed-bridges.yaml. It exits without doing anything if done closes
+// first, which means entry was already removed deliberately (Remove, or
+// process shutdown).
+//
+// It compares identity (cur == entry), not just name, before touching
+// the registry: name alone isn't enough once a name can be reused (a
+// Remove immediately followed by an Add of the same name) while this
+// goroutine is still waiting on fatalCh from the *previous* bridge that
+// held that name -- keying on name alone would let a stale fatal signal
+// delete a brand new, healthy entry.
+func (m *bridgeManager) watchFatal(entry *managedEntry, fatalCh <-chan error, done <-chan struct{}) {
 	select {
 	case err := <-fatalCh:
 		m.mu.Lock()
-		if _, ok := m.entries[name]; ok {
-			delete(m.entries, name)
-			log.Printf("management: bridge %q removed from the running set after a fatal error: %v", name, err)
+		if cur, ok := m.entries[entry.cfg.Name]; ok && cur == entry {
+			entry.rb = nil
+			entry.lastError = err
+			entry.fatalDone = nil
+			log.Printf("management: bridge %q stopped after a fatal error: %v", entry.cfg.Name, err)
 		}
 		m.mu.Unlock()
 	case <-done:
@@ -196,36 +275,46 @@ func (m *bridgeManager) watchFatal(name string, fatalCh <-chan error, done <-cha
 // Add validates and starts a new bridge, registers it with source
 // "managed", and persists it to managed-bridges.yaml. A relative Listen
 // path is rejected -- unlike config.yaml's bridges:, there's no config
-// file directory to sensibly resolve one against here.
-func (m *bridgeManager) Add(cfg BridgeConfig) (BridgeConfig, error) {
+// file directory to sensibly resolve one against here. It returns the
+// new bridge's info (not just its BridgeConfig) so a caller -- namely
+// handleAdd -- doesn't need to fabricate a managedEntry of its own just
+// to report Running/Source correctly.
+func (m *bridgeManager) Add(cfg BridgeConfig) (bridgeInfo, error) {
 	normalizeBridgeMode(&cfg)
 	if err := validateBridgeFields(cfg); err != nil {
-		return BridgeConfig{}, badRequest("%s", err)
+		return bridgeInfo{}, badRequest("%s", err)
 	}
 	if !filepath.IsAbs(cfg.Listen) {
-		return BridgeConfig{}, badRequest("bridge %q: listen path must be absolute when added through the management API (got %q)", cfg.Name, cfg.Listen)
+		return bridgeInfo{}, badRequest("bridge %q: listen path must be absolute when added through the management API (got %q)", cfg.Name, cfg.Listen)
+	}
+	if cfg.Listen == m.managementSocket {
+		return bridgeInfo{}, conflictErr("listen path %q is the management socket itself", cfg.Listen)
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if _, exists := m.entries[cfg.Name]; exists {
-		return BridgeConfig{}, conflictErr("bridge %q already exists", cfg.Name)
+	if existing, exists := m.entries[cfg.Name]; exists {
+		if existing.rb == nil {
+			return bridgeInfo{}, conflictErr("bridge %q already exists, stopped (%v) -- remove it first to replace it", cfg.Name, existing.lastError)
+		}
+		return bridgeInfo{}, conflictErr("bridge %q already exists", cfg.Name)
 	}
 	for _, e := range m.entries {
 		if e.cfg.Listen == cfg.Listen {
-			return BridgeConfig{}, conflictErr("listen path %q is already in use by bridge %q", cfg.Listen, e.cfg.Name)
+			return bridgeInfo{}, conflictErr("listen path %q is already in use by bridge %q", cfg.Listen, e.cfg.Name)
 		}
 	}
 
 	fatalCh := make(chan error, 1)
 	rb, err := startBridge(m.ctx, m.dial, cfg, m.sockMode, m.group, fatalCh)
 	if err != nil {
-		return BridgeConfig{}, badRequest("starting bridge %q: %v", cfg.Name, err)
+		return bridgeInfo{}, badRequest("starting bridge %q: %v", cfg.Name, err)
 	}
 	done := make(chan struct{})
-	m.entries[cfg.Name] = &managedEntry{cfg: cfg, rb: rb, source: "managed", fatalDone: done}
-	go m.watchFatal(cfg.Name, fatalCh, done)
+	entry := &managedEntry{cfg: cfg, rb: rb, source: "managed", fatalDone: done}
+	m.entries[cfg.Name] = entry
+	go m.watchFatal(entry, fatalCh, done)
 
 	if err := m.saveLocked(); err != nil {
 		// The bridge is live either way; a persistence failure means it
@@ -234,32 +323,45 @@ func (m *bridgeManager) Add(cfg BridgeConfig) (BridgeConfig, error) {
 		log.Printf("management: bridge %q started but failed to persist to %s: %v", cfg.Name, m.statePath, err)
 	}
 
-	return cfg, nil
+	return toBridgeInfo(entry), nil
 }
 
-// Remove stops name and, if it was source "managed", drops it from
-// managed-bridges.yaml. A bridge that came from config.yaml just stops
-// running -- config.yaml isn't rewritten, so it returns on the next
-// restart unless config.yaml is edited too.
+// Remove stops name (if it's currently running -- a non-running entry,
+// see managedEntry, has nothing to stop) and, if it was source
+// "managed", drops it from managed-bridges.yaml. A bridge that came from
+// config.yaml just stops running -- config.yaml isn't rewritten, so it
+// returns on the next restart unless config.yaml is edited too.
+//
+// The entry is removed from the registry, and managed-bridges.yaml
+// rewritten, before the (potentially slow, up to shutdownDrainTimeout)
+// drain -- not after -- so Remove only holds m.mu long enough to update
+// the registry, not for the whole drain. Otherwise every other request
+// (GET /bridges, another Add or Remove) would block for however long
+// this one bridge's in-flight connections take to finish, up to 10s.
 func (m *bridgeManager) Remove(name string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	entry, ok := m.entries[name]
 	if !ok {
+		m.mu.Unlock()
 		return notFoundErr("bridge %q not found", name)
 	}
-
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownDrainTimeout)
-	defer cancel()
-	entry.rb.Shutdown(shutdownCtx)
-	close(entry.fatalDone)
 	delete(m.entries, name)
-
+	if entry.fatalDone != nil {
+		close(entry.fatalDone)
+	}
+	var saveErr error
 	if entry.source == "managed" {
-		if err := m.saveLocked(); err != nil {
-			log.Printf("management: bridge %q removed but failed to update %s: %v", name, m.statePath, err)
-		}
+		saveErr = m.saveLocked()
+	}
+	m.mu.Unlock()
+
+	if entry.rb != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownDrainTimeout)
+		defer cancel()
+		entry.rb.Shutdown(shutdownCtx)
+	}
+	if saveErr != nil {
+		log.Printf("management: bridge %q removed but failed to update %s: %v", name, m.statePath, saveErr)
 	}
 	return nil
 }
@@ -288,14 +390,19 @@ func (m *bridgeManager) List() []bridgeInfo {
 }
 
 func toBridgeInfo(e *managedEntry) bridgeInfo {
-	return bridgeInfo{
+	info := bridgeInfo{
 		Name:        e.cfg.Name,
 		Listen:      e.cfg.Listen,
 		Target:      e.cfg.Target,
 		Mode:        e.cfg.Mode,
 		RewriteHost: e.cfg.RewriteHost,
 		Source:      e.source,
+		Running:     e.rb != nil,
 	}
+	if e.lastError != nil {
+		info.Error = e.lastError.Error()
+	}
+	return info
 }
 
 // Shutdown stops every currently running bridge, bounded by ctx, mirroring
@@ -311,6 +418,9 @@ func (m *bridgeManager) Shutdown(ctx context.Context) {
 
 	var wg sync.WaitGroup
 	for _, e := range entries {
+		if e.rb == nil {
+			continue // never started, or already dead -- nothing to shut down
+		}
 		wg.Add(1)
 		go func(e *managedEntry) {
 			defer wg.Done()
@@ -444,7 +554,7 @@ func (m *bridgeManager) handleAdd(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, toBridgeInfo(&managedEntry{cfg: added, source: "managed"}))
+	writeJSON(w, http.StatusCreated, added)
 }
 
 func (m *bridgeManager) handleRemove(w http.ResponseWriter, r *http.Request) {
@@ -482,16 +592,21 @@ func startManagementServer(path string, mode os.FileMode, group string, m *bridg
 		return nil, fmt.Errorf("management socket: %w", err)
 	}
 
+	// httpBridge.Shutdown calls cancel() unconditionally, so this needs
+	// its own cancellable ctx even though nothing here reads it except
+	// the log-suppression check below -- see startHTTPBridge's identical
+	// pattern in bridge.go.
+	ctx, cancel := context.WithCancel(m.ctx)
 	srv := &http.Server{
 		Handler:           m.Handler(),
 		ReadHeaderTimeout: httpReadHeaderTimeout,
 	}
 
 	go func() {
-		if err := srv.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) && m.ctx.Err() == nil {
+		if err := srv.Serve(l); err != nil && !errors.Is(err, http.ErrServerClosed) && ctx.Err() == nil {
 			log.Printf("management: server stopped: %v", err)
 		}
 	}()
 
-	return &httpBridge{srv: srv, l: l}, nil
+	return &httpBridge{srv: srv, l: l, cancel: cancel}, nil
 }

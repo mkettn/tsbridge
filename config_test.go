@@ -401,3 +401,34 @@ bridges: []
 		t.Fatalf("want error naming management_socket_mode, got: %v", err)
 	}
 }
+
+func TestLoadConfig_ManagementSocketGroupWithoutSocketRejected(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), `
+management_socket_group: admins
+bridges: []
+`)
+	_, err := LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err == nil || !strings.Contains(err.Error(), "management_socket_group") {
+		t.Fatalf("want error naming management_socket_group, got: %v", err)
+	}
+}
+
+// management_socket's default mode (0600, owner-only) gives the group
+// nothing, so setting management_socket_group without also setting an
+// explicit management_socket_mode would silently grant no access at all
+// -- reject it instead of leaving a socket that looks configured for
+// group access and isn't.
+func TestLoadConfig_ManagementSocketGroupWithoutModeRejected(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), `
+state_dir: state
+management_socket: control.sock
+management_socket_group: admins
+bridges: []
+`)
+	_, err := LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err == nil || !strings.Contains(err.Error(), "management_socket_mode") {
+		t.Fatalf("want error naming the missing management_socket_mode, got: %v", err)
+	}
+}

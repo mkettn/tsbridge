@@ -291,11 +291,16 @@ running — instead of editing `config.yaml` and restarting. It's unset
 ```yaml
 state_dir: /var/lib/tsbridge   # required if management_socket is set
 management_socket: /run/tsbridge/control.sock
-management_socket_mode: "0600"     # optional, defaults to "0600" (owner-only --
+management_socket_mode: "0660"     # optional, defaults to "0600" (owner-only --
                                     # this socket can create a bridge to *any*
                                     # tailnet target, a bigger blast radius than
-                                    # any one bridge socket)
-# management_socket_group: admins  # optional, its own group -- independent of socket_group
+                                    # any one bridge socket). Required if
+                                    # management_socket_group is set: the
+                                    # default 0600 gives the group no access,
+                                    # so setting only the group would silently
+                                    # grant nothing -- tsbridge rejects that
+                                    # combination at startup instead.
+management_socket_group: admins    # optional, its own group -- independent of socket_group
 ```
 
 It speaks plain JSON over HTTP on that socket:
@@ -314,23 +319,44 @@ curl --unix-socket /run/tsbridge/control.sock \
   -H 'content-type: application/json' \
   -d '{"name":"svc","listen":"/run/tsbridge/svc.sock","target":"remote-machine:1234"}'
 
-# List what's running.
+# List every bridge tsbridge knows about.
 curl --unix-socket /run/tsbridge/control.sock http://unix/bridges
 
 # Remove it again.
 curl --unix-socket /run/tsbridge/control.sock -X DELETE http://unix/bridges/svc
 ```
 
+A bridge in a `GET` response looks like this:
+
+```json
+{
+  "name": "svc",
+  "listen": "/run/tsbridge/svc.sock",
+  "target": "remote-machine:1234",
+  "mode": "tcp",
+  "rewrite_host": false,
+  "source": "managed",
+  "running": true,
+  "error": ""
+}
+```
+
+`running: false` with a non-empty `error` means this bridge isn't
+currently serving anything — either it failed to start, or it started
+and later hit a fatal error (see [Failure isolation](#failure-isolation)
+below); the entry stays listed either way rather than disappearing.
+
 `POST` accepts the same fields as a `bridges:` entry (`name`, `listen`,
 `target`, `mode`, `rewrite_host`) with the same validation and defaults
 (`mode` defaults to `tcp`), with one difference: **`listen` must be an
 absolute path** — there's no config file directory to sensibly resolve a
 relative one against here. `name` and `listen` must still be unique
-across every currently running bridge, config-defined or
-API-added — a conflict is a `409 Conflict` naming it, the same
-information a startup-time duplicate error gives you. A malformed or
-invalid request is `400 Bad Request`; removing a name that isn't running
-is `404 Not Found`.
+across every bridge tsbridge knows about (config-defined, API-added, or
+not currently running) and can't equal `management_socket`'s own path —
+a conflict is a `409 Conflict` naming it, the same information a
+startup-time duplicate error gives you. A malformed or invalid request
+is `400 Bad Request`; removing a name that doesn't exist is
+`404 Not Found`.
 
 ### Persistence: `managed-bridges.yaml`
 
@@ -339,11 +365,21 @@ A bridge added through the API is persisted to
 shape as `config.yaml`'s own `bridges:` list (it's genuinely just
 another file `tsbridge` sources bridge configuration from). On every
 startup, `tsbridge` loads `config.yaml`'s `bridges:` and
-`managed-bridges.yaml`'s together as one combined set, validated with
-the same duplicate-name/duplicate-listen rules as `config.yaml` alone —
-a conflict between the two is a fatal startup error naming which file
-each side came from. **`config.yaml` itself is never read back or
-rewritten** by the management API; only `managed-bridges.yaml` is.
+`managed-bridges.yaml`'s together as one combined set. **`config.yaml`
+itself is never read back or rewritten** by the management API; only
+`managed-bridges.yaml` is.
+
+`config.yaml`'s own `bridges:` list stays exactly as fail-fast as always
+— a bad entry or a duplicate within it is still a fatal startup error.
+`managed-bridges.yaml` is treated more tolerantly, since (unlike
+`config.yaml`) it isn't meant to be your primary hand-authored config
+and can plausibly drift or be hand-edited: each of its entries is
+normalized the same way `config.yaml`'s are (so e.g. an entry that omits
+`mode:` is fine, same as in `config.yaml`), and a managed entry that's
+invalid, whose `name`/`listen` collides with `config.yaml`, with another
+managed entry, or with `management_socket` itself, is skipped with a
+loud log line rather than failing startup — one bad line in that file
+shouldn't take every other bridge down with it.
 
 This gives each bridge an origin that decides what removing it does:
 
@@ -363,20 +399,20 @@ every entry so you can tell which is which before removing one.
 
 A bridge that hits a fatal, non-recoverable error (as opposed to a
 transient one like a temporary file-descriptor exhaustion, which is
-already retried with backoff) is removed from the running set and
-logged, but **no longer takes the rest of `tsbridge` down with it** —
-every other bridge, and the tailnet session itself, keeps running. This
-holds whether or not `management_socket` is configured. It's a
-deliberate change in behavior: previously, any one bridge's fatal error
-exited the whole process (so `systemd`'s `Restart=on-failure` would
-fire); now that bridges can be managed independently at runtime, one
-bridge's failure shouldn't take unrelated ones down too.
+already retried with backoff) is marked not running and logged, but
+**no longer takes the rest of `tsbridge` down with it** — every other
+bridge, and the tailnet session itself, keeps running. This holds
+whether or not `management_socket` is configured. It's a deliberate
+change in behavior: previously, any one bridge's fatal error exited the
+whole process (so `systemd`'s `Restart=on-failure` would fire); now that
+bridges can be managed independently at runtime, one bridge's failure
+shouldn't take unrelated ones down too.
 
-A fatally-failed bridge is **not** removed from `managed-bridges.yaml`
-if it came from there — only an explicit `DELETE` does that — so a
-process restart gives it a fresh attempt rather than losing it for
-good. Check `GET /bridges` (or the logs) to see what's actually running
-versus what's configured.
+The bridge stays listed in `GET /bridges` (`"running": false`, with
+`"error"` explaining why) rather than disappearing, and a fatally-failed
+bridge is **not** removed from `managed-bridges.yaml` if it came from
+there — only an explicit `DELETE` does that — so a process restart gives
+it a fresh attempt rather than losing it for good.
 
 ## Install
 
@@ -509,7 +545,11 @@ slightly by `mode`:
 
 The management socket (if configured) gets the same drain window and is
 unlinked the same way on shutdown, as an `http`-mode bridge would be —
-it's an HTTP server under the hood.
+it's an HTTP server under the hood. It's shut down *first*, fully, before
+any bridge is: this closes off new API requests (and waits for any
+already in flight to finish) before bridges start being torn down, so a
+`POST`/`DELETE` can't race the shutdown and, say, add a bridge that never
+gets drained or rewrite `managed-bridges.yaml` with a stale snapshot.
 
 This is process-wide shutdown, triggered only by a signal. A single
 bridge hitting a fatal error at runtime is a different, narrower event —

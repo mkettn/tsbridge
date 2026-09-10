@@ -166,12 +166,14 @@ func lookupGID(name string) (int, error) {
 // Unix socket and the tailnet target, one goroutine tree per accepted
 // connection.
 type tcpBridge struct {
-	l  net.Listener
-	wg sync.WaitGroup // acceptLoop + one handleConn goroutine per connection
+	l      net.Listener
+	cancel context.CancelFunc // cancels this bridge's own ctx; see Shutdown
+	wg     sync.WaitGroup     // acceptLoop + one handleConn goroutine per connection
 }
 
 func startTCPBridge(ctx context.Context, dial dialFunc, b BridgeConfig, l net.Listener, fatal chan<- error) *tcpBridge {
-	t := &tcpBridge{l: l}
+	ctx, cancel := context.WithCancel(ctx)
+	t := &tcpBridge{l: l, cancel: cancel}
 	t.wg.Add(1)
 	go func() {
 		defer t.wg.Done()
@@ -180,9 +182,16 @@ func startTCPBridge(ctx context.Context, dial dialFunc, b BridgeConfig, l net.Li
 	return t
 }
 
-// Shutdown closes the listener (unlinking the socket) and waits, bounded
+// Shutdown cancels this bridge's own context first, so acceptLoop's
+// ctx.Err() check recognizes the listener close below as deliberate
+// rather than reporting it as a fatal error -- this matters beyond
+// process-wide shutdown: the management API (manage.go) calls Shutdown
+// on one bridge at a time while the process, and every other bridge,
+// keeps running, and a deliberate removal must not look like a crash.
+// It then closes the listener (unlinking the socket) and waits, bounded
 // by ctx, for the accept loop and any in-flight connections to finish.
 func (t *tcpBridge) Shutdown(ctx context.Context) {
+	t.cancel()
 	t.l.Close()
 	done := make(chan struct{})
 	go func() {
@@ -289,11 +298,13 @@ func closeWrite(c net.Conn) {
 // terminates each request and reverse-proxies it to the tailnet target,
 // dialing out through dial rather than raw-copying bytes.
 type httpBridge struct {
-	srv *http.Server
-	l   net.Listener
+	srv    *http.Server
+	l      net.Listener
+	cancel context.CancelFunc // cancels this bridge's own ctx; see Shutdown
 }
 
 func startHTTPBridge(ctx context.Context, dial dialFunc, b BridgeConfig, l net.Listener, fatal chan<- error) *httpBridge {
+	ctx, cancel := context.WithCancel(ctx)
 	targetURL := &url.URL{Scheme: "http", Host: b.Target}
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 	// NewSingleHostReverseProxy's default Director rewrites r.URL.Host
@@ -342,7 +353,7 @@ func startHTTPBridge(ctx context.Context, dial dialFunc, b BridgeConfig, l net.L
 		}
 	}()
 
-	return &httpBridge{srv: httpSrv, l: l}
+	return &httpBridge{srv: httpSrv, l: l, cancel: cancel}
 }
 
 // Shutdown stops accepting new connections and waits, bounded by ctx,
@@ -359,7 +370,15 @@ func startHTTPBridge(ctx context.Context, dial dialFunc, b BridgeConfig, l net.L
 // wraps l in a once-close wrapper and net.UnixListener.Close is safe to
 // call twice, so closing it again from Serve's own deferred cleanup is
 // harmless.
+//
+// cancel is called first so the Serve goroutine's ctx.Err() check (used
+// to decide whether a non-ErrServerClosed Serve error is worth logging)
+// recognizes this as deliberate. Serve returning exactly ErrServerClosed
+// already covers the common case on its own, but cancelling here keeps
+// both bridge types symmetric and covers startManagementServer, which
+// builds an httpBridge directly rather than through startHTTPBridge.
 func (h *httpBridge) Shutdown(ctx context.Context) {
+	h.cancel()
 	defer h.l.Close()
 	if err := h.srv.Shutdown(ctx); err != nil {
 		h.srv.Close()
