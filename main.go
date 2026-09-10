@@ -9,7 +9,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"os/signal"
 	"sync"
@@ -92,25 +91,23 @@ func run() error {
 
 	log.Printf("configured %d bridge(s):", len(cfg.Bridges))
 	for _, b := range cfg.Bridges {
-		log.Printf("  - %s: %s -> %s", b.Name, b.Listen, b.Target)
+		log.Printf("  - %s [%s]: %s -> %s", b.Name, b.Mode, b.Listen, b.Target)
 	}
 
-	var wg sync.WaitGroup
-	var listeners []net.Listener
-	// Buffered so a bridge's accept loop can report a fatal error and
-	// return without blocking on a reader that may already have moved
-	// on to shutdown.
+	var running []runningBridge
+	// Buffered so a bridge can report a fatal error and return without
+	// blocking on a reader that may already have moved on to shutdown.
 	fatal := make(chan error, len(cfg.Bridges))
 	for _, b := range cfg.Bridges {
-		l, err := startBridge(ctx, srv, b, cfg.SocketMode, cfg.SocketGroup, &wg, fatal)
+		rb, err := startBridge(ctx, srv.Dial, b, cfg.SocketMode, cfg.SocketGroup, fatal)
 		if err != nil {
 			log.Printf("bridge %s: failed to start, skipping: %v", b.Name, err)
 			continue
 		}
-		listeners = append(listeners, l)
+		running = append(running, rb)
 	}
 
-	if len(cfg.Bridges) > 0 && len(listeners) == 0 {
+	if len(cfg.Bridges) > 0 && len(running) == 0 {
 		return errors.New("no bridges could be started")
 	}
 
@@ -118,28 +115,25 @@ func run() error {
 	select {
 	case <-ctx.Done():
 	case err := <-fatal:
-		// A bridge's accept loop died for good (not just shutting
-		// down); take the whole process down so Restart=on-failure
-		// actually fires instead of leaving a silently dead bridge.
+		// A bridge died for good (not just shutting down); take the
+		// whole process down so Restart=on-failure actually fires
+		// rather than leaving a silently dead bridge.
 		runErr = err
 		stop()
 	}
 	log.Println("shutting down...")
 
-	for _, l := range listeners {
-		l.Close() // unlinks the Unix socket file
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownDrainTimeout)
+	defer cancelShutdown()
+	var shutdownWG sync.WaitGroup
+	for _, rb := range running {
+		shutdownWG.Add(1)
+		go func() {
+			defer shutdownWG.Done()
+			rb.Shutdown(shutdownCtx)
+		}()
 	}
-
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-	select {
-	case <-done:
-	case <-time.After(shutdownDrainTimeout):
-		log.Printf("shutdown: %v drain timeout reached with connections still open, exiting anyway", shutdownDrainTimeout)
-	}
+	shutdownWG.Wait()
 
 	log.Println("shutdown complete")
 	return runErr

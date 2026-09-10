@@ -7,6 +7,9 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"os/user"
 	"strconv"
@@ -14,32 +17,46 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-
-	"tailscale.com/tsnet"
 )
 
 const (
 	acceptBackoffMin = 5 * time.Millisecond
 	acceptBackoffMax = 1 * time.Second
+
+	// httpReadHeaderTimeout bounds how long an http-mode bridge waits for
+	// a client to finish sending request headers, so a slow/idle client
+	// on the Unix socket can't tie up a handler indefinitely.
+	httpReadHeaderTimeout = 10 * time.Second
 )
 
+// dialFunc opens a connection to the tailnet target. In production this
+// is always srv.Dial (tsnet.Server's method value matches this type
+// exactly); tests substitute a fake to exercise bridge logic without a
+// real tailnet.
+type dialFunc func(ctx context.Context, network, address string) (net.Conn, error)
+
+// runningBridge is what startBridge hands back: something main can stop
+// uniformly regardless of mode. Shutdown stops the bridge from accepting
+// new work and waits, bounded by ctx, for whatever's in flight to finish
+// before returning; the Unix socket file is unlinked either way.
+type runningBridge interface {
+	Shutdown(ctx context.Context)
+}
+
 // startBridge creates the bridge's Unix socket (removing any stale one
-// first) with the given permissions, then accepts connections in the
-// background until ctx is cancelled. The returned listener's Close method
-// unlinks the socket file.
+// first) with the given permissions, then starts serving it in the
+// background according to b.Mode until Shutdown is called on the
+// returned runningBridge.
 //
-// wg is used both for the accept loop goroutine and for each accepted
-// connection's handler goroutine, so callers can wait for in-flight
-// connections to finish before exiting. If the accept loop hits an error
-// it can't recover from, it sends on fatal (non-blocking) so the caller
-// can shut the whole process down rather than leaving a dead bridge
-// silently bound but unserved.
-func startBridge(ctx context.Context, srv *tsnet.Server, b BridgeConfig, mode os.FileMode, group string, wg *sync.WaitGroup, fatal chan<- error) (net.Listener, error) {
+// If serving hits an error it can't recover from, it sends on fatal
+// (non-blocking) so the caller can shut the whole process down rather
+// than leaving a dead bridge silently bound but unserved.
+func startBridge(ctx context.Context, dial dialFunc, b BridgeConfig, sockMode os.FileMode, group string, fatal chan<- error) (runningBridge, error) {
 	if err := removeStaleSocket(b.Listen); err != nil {
 		return nil, err
 	}
 
-	l, err := listenWithMode(b.Listen, mode)
+	l, err := listenWithMode(b.Listen, sockMode)
 	if err != nil {
 		return nil, fmt.Errorf("listening on unix socket: %w", err)
 	}
@@ -48,7 +65,7 @@ func startBridge(ctx context.Context, srv *tsnet.Server, b BridgeConfig, mode os
 	// umask, but chmod again as cheap defense-in-depth (e.g. in case the
 	// umask trick doesn't apply on some platform) -- this is a no-op in
 	// the common case, not a new permissive window.
-	if err := os.Chmod(b.Listen, mode); err != nil {
+	if err := os.Chmod(b.Listen, sockMode); err != nil {
 		l.Close()
 		return nil, fmt.Errorf("chmod socket: %w", err)
 	}
@@ -65,13 +82,12 @@ func startBridge(ctx context.Context, srv *tsnet.Server, b BridgeConfig, mode os
 		}
 	}
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		acceptLoop(ctx, srv, b, l, wg, fatal)
-	}()
-
-	return l, nil
+	switch b.Mode {
+	case "http":
+		return startHTTPBridge(ctx, dial, b, l, fatal), nil
+	default: // "tcp", the only other value checkBridges allows
+		return startTCPBridge(ctx, dial, b, l, fatal), nil
+	}
 }
 
 // removeStaleSocket removes b.Listen only if it's genuinely a leftover
@@ -132,6 +148,39 @@ func lookupGID(name string) (int, error) {
 	return strconv.Atoi(g.Gid)
 }
 
+// tcpBridge is mode: tcp -- a raw bidirectional byte copy between the
+// Unix socket and the tailnet target, one goroutine tree per accepted
+// connection.
+type tcpBridge struct {
+	l  net.Listener
+	wg sync.WaitGroup // acceptLoop + one handleConn goroutine per connection
+}
+
+func startTCPBridge(ctx context.Context, dial dialFunc, b BridgeConfig, l net.Listener, fatal chan<- error) *tcpBridge {
+	t := &tcpBridge{l: l}
+	t.wg.Add(1)
+	go func() {
+		defer t.wg.Done()
+		acceptLoop(ctx, dial, b, l, &t.wg, fatal)
+	}()
+	return t
+}
+
+// Shutdown closes the listener (unlinking the socket) and waits, bounded
+// by ctx, for the accept loop and any in-flight connections to finish.
+func (t *tcpBridge) Shutdown(ctx context.Context) {
+	t.l.Close()
+	done := make(chan struct{})
+	go func() {
+		t.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+}
+
 // acceptLoop accepts connections on l until it's closed. Each connection
 // is handled in its own goroutine so a slow or wedged peer, or an
 // unreachable tailnet target, can't stall other bridges or other
@@ -141,7 +190,7 @@ func lookupGID(name string) (int, error) {
 // retried with backoff rather than ending the bridge. Any other error
 // closes the listener and reports itself on fatal so the bridge doesn't
 // keep the socket bound-but-dead with clients hanging in the backlog.
-func acceptLoop(ctx context.Context, srv *tsnet.Server, b BridgeConfig, l net.Listener, wg *sync.WaitGroup, fatal chan<- error) {
+func acceptLoop(ctx context.Context, dial dialFunc, b BridgeConfig, l net.Listener, wg *sync.WaitGroup, fatal chan<- error) {
 	backoff := acceptBackoffMin
 	for {
 		conn, err := l.Accept()
@@ -169,7 +218,7 @@ func acceptLoop(ctx context.Context, srv *tsnet.Server, b BridgeConfig, l net.Li
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			handleConn(ctx, srv, b, conn)
+			handleConn(ctx, dial, b, conn)
 		}()
 	}
 }
@@ -180,14 +229,11 @@ func isTemporaryAcceptError(err error) bool {
 
 var connCounter uint64
 
-func handleConn(ctx context.Context, srv *tsnet.Server, b BridgeConfig, local net.Conn) {
+func handleConn(ctx context.Context, dial dialFunc, b BridgeConfig, local net.Conn) {
 	defer local.Close()
 	id := atomic.AddUint64(&connCounter, 1)
 
-	// The tailnet-side network is always TCP regardless of b.Mode --
-	// Mode selects what tsbridge does with the bytes once connected
-	// (currently only the raw copy below), not the transport.
-	remote, err := srv.Dial(ctx, "tcp", b.Target)
+	remote, err := dial(ctx, "tcp", b.Target)
 	if err != nil {
 		log.Printf("bridge %s: conn %d: dial %s failed: %v", b.Name, id, b.Target, err)
 		return
@@ -222,5 +268,86 @@ func closeWrite(c net.Conn) {
 	}
 	if wc, ok := c.(writeCloser); ok {
 		wc.CloseWrite()
+	}
+}
+
+// httpBridge is mode: http -- an HTTP server on the Unix socket that
+// terminates each request and reverse-proxies it to the tailnet target,
+// dialing out through dial rather than raw-copying bytes.
+type httpBridge struct {
+	srv *http.Server
+	l   net.Listener
+}
+
+func startHTTPBridge(ctx context.Context, dial dialFunc, b BridgeConfig, l net.Listener, fatal chan<- error) *httpBridge {
+	targetURL := &url.URL{Scheme: "http", Host: b.Target}
+	proxy := httputil.NewSingleHostReverseProxy(targetURL)
+	// NewSingleHostReverseProxy's default Director rewrites r.URL.Host
+	// (what gets dialed) but leaves r.Host -- the actual Host header
+	// sent on the wire -- as whatever arrived on the incoming request.
+	// That's the default here too (b.RewriteHost false): most backends
+	// don't care what Host they're addressed as. A virtual-host-style
+	// one does (tailscale serve, for one: it keys routes by the target
+	// node's own hostname, and 404s on anything else) -- rewrite_host:
+	// true forces r.Host to target's host so a backend like that
+	// recognizes the request as its own.
+	if b.RewriteHost {
+		defaultDirector := proxy.Director
+		proxy.Director = func(r *http.Request) {
+			defaultDirector(r)
+			r.Host = targetURL.Host
+		}
+	}
+	proxy.Transport = &http.Transport{
+		DialContext: func(dialCtx context.Context, network, addr string) (net.Conn, error) {
+			return dial(dialCtx, "tcp", addr)
+		},
+	}
+	proxy.ModifyResponse = func(resp *http.Response) error {
+		log.Printf("bridge %s: %s %s -> %s: %d", b.Name, resp.Request.Method, resp.Request.URL.RequestURI(), b.Target, resp.StatusCode)
+		return nil
+	}
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		log.Printf("bridge %s: %s %s -> %s: %v", b.Name, r.Method, r.URL.RequestURI(), b.Target, err)
+		w.WriteHeader(http.StatusBadGateway)
+	}
+
+	httpSrv := &http.Server{
+		Handler:           proxy,
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+	}
+
+	go func() {
+		err := httpSrv.Serve(l)
+		if err != nil && !errors.Is(err, http.ErrServerClosed) && ctx.Err() == nil {
+			log.Printf("bridge %s: fatal http server error, stopping: %v", b.Name, err)
+			select {
+			case fatal <- fmt.Errorf("bridge %s: http server stopped: %w", b.Name, err):
+			default:
+			}
+		}
+	}()
+
+	return &httpBridge{srv: httpSrv, l: l}
+}
+
+// Shutdown stops accepting new connections and waits, bounded by ctx,
+// for in-flight requests to finish; if ctx runs out first, it force-closes
+// whatever's left rather than leaving it to linger past shutdown.
+//
+// It closes l itself rather than relying solely on http.Server.Shutdown
+// to do it: Shutdown only closes listeners Serve has already registered
+// (via trackListener), so a Shutdown call racing the Serve goroutine's
+// own startup can find nothing tracked yet and return nil having closed
+// nothing -- which would also skip the Close() fallback below, since
+// that only fires on a non-nil error. Closing l unconditionally here
+// means the socket file is unlinked regardless of that race; Serve
+// wraps l in a once-close wrapper and net.UnixListener.Close is safe to
+// call twice, so closing it again from Serve's own deferred cleanup is
+// harmless.
+func (h *httpBridge) Shutdown(ctx context.Context) {
+	defer h.l.Close()
+	if err := h.srv.Shutdown(ctx); err != nil {
+		h.srv.Close()
 	}
 }

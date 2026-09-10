@@ -44,13 +44,22 @@ socket_mode: "0660"
 
 # All bridges this instance serves. Each maps a local Unix socket to a
 # host:port reachable over the tailnet. `mode` is optional and defaults
-# to "tcp" -- the only value currently supported -- so it's normally
-# left out; shown once below just to name it.
+# to "tcp" (raw byte copy, protocol-agnostic) -- "http" is the other
+# option, which terminates HTTP on the socket and reverse-proxies each
+# request to target instead (see README's "HTTP mode" section for what
+# that buys you over tcp for an HTTP-shaped service).
 bridges:
   - name: my-service
     listen: /run/tsbridge/my-service.sock
     target: remote-machine:1234
     mode: tcp
-  - name: other-service
-    listen: /run/tsbridge/other-service.sock
-    target: other-machine:5678
+  - name: my-http-service
+    listen: /run/tsbridge/my-http-service.sock
+    target: other-machine:8080
+    mode: http
+    # mode: http only. Optional, defaults to false: the proxied request's
+    # Host header passes through unchanged (whatever the client sent).
+    # Set true if target routes/validates by hostname instead -- a
+    # `tailscale serve`-published target is the common case -- so it
+    # gets target's own host:port as its Host header instead.
+    # rewrite_host: true
