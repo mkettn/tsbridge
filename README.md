@@ -20,9 +20,6 @@ directly to `remote-machine:1234` on the tailnet.
 - [`example/`](example/) — self-contained runnable example: a `config.yaml`
   bridging one tailnet HTTP service to a local socket, plus a `Caddyfile`
   serving that socket on `localhost:1234`
-- [`.github/dependabot.yml`](.github/dependabot.yml) — security-only,
-  grouped dependency update config (see
-  [Dependency updates](#dependency-updates-dependabot) below)
 
 ## Building
 
@@ -556,25 +553,3 @@ path "..."`) rather than failing partway through startup.
   (see [HTTP mode](#http-mode-reverse-proxy)); anything else
   protocol-specific (TLS termination, gRPC, etc.) still belongs in
   whatever connects to the Unix socket, not here.
-
-## Dependency updates (Dependabot)
-
-[`.github/dependabot.yml`](.github/dependabot.yml) is configured to be
-security-only and grouped: routine "a newer version exists" PRs are
-disabled entirely (`open-pull-requests-limit: 0`), and any dependency
-with a known vulnerability lands in a single grouped PR instead of one
-per dependency.
-
-Two things worth knowing:
-
-- **This file alone doesn't turn Dependabot on.** Dependabot alerts and
-  Dependabot security updates also need to be enabled for this repo
-  under **Settings → Code security and analysis** — a one-time manual
-  step; there's no way to flip that switch from a committed file.
-- **Security PRs aren't deferred to a schedule.** They open as soon as a
-  vulnerability is disclosed for a dependency this repo uses, by
-  GitHub's design — a fix for something critical is never held back.
-  `schedule.interval` in the config only paces routine version-update
-  checks (which are disabled here anyway); grouping still helps in the
-  way that matters, bundling multiple simultaneously-open vulnerabilities
-  into one PR, but it can't turn "immediately" into "batched weekly."
