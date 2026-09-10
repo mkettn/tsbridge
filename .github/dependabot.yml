@@ -1,0 +1,36 @@
+# Dependabot configuration: security fixes only, grouped into one PR
+# instead of one per dependency. See README section this generates no
+# routine "bump to latest" noise -- that path is deliberately disabled
+# below (open-pull-requests-limit: 0).
+#
+# One important limit worth knowing before relying on this: Dependabot
+# security-update PRs always open as soon as a vulnerability is
+# disclosed for a dependency this repo uses -- that's intentional on
+# GitHub's part, so a fix for something critical is never held back.
+# `schedule` below has no effect on that timing; it only paces the
+# (here, disabled) routine version-update checks. Grouping still helps
+# in the way that matters: if more than one vulnerability is open at
+# once, they land in a single PR rather than one each -- it just can't
+# turn "immediately" into "batched once a week."
+#
+# This file only shapes *how* security-update PRs look once they're
+# created; it doesn't turn the feature on by itself. Dependabot alerts
+# and Dependabot security updates also need to be enabled for this repo
+# under Settings -> Code security and analysis (a one-time manual step;
+# there's no way to flip that switch from a committed file).
+version: 2
+updates:
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # Disables routine "a newer version exists" PRs entirely. Security
+    # updates aren't subject to this limit and keep flowing regardless
+    # -- this is what makes the bot security-only rather than also
+    # nagging about ordinary version bumps.
+    open-pull-requests-limit: 0
+    groups:
+      security-updates:
+        applies-to: security-updates
+        patterns:
+          - "*"
