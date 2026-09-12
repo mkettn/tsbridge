@@ -432,3 +432,38 @@ bridges: []
 		t.Fatalf("want error naming the missing management_socket_mode, got: %v", err)
 	}
 }
+
+func TestLoadConfig_BridgeEnabledDefaultsToTrue(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), `
+bridges:
+  - name: svc
+    listen: /run/svc.sock
+    target: host:1
+`)
+	cfg, err := LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Bridges[0].Enabled == nil || !*cfg.Bridges[0].Enabled {
+		t.Errorf("want enabled to default to true, got %+v", cfg.Bridges[0].Enabled)
+	}
+}
+
+func TestLoadConfig_BridgeEnabledFalseAccepted(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), `
+bridges:
+  - name: svc
+    listen: /run/svc.sock
+    target: host:1
+    enabled: false
+`)
+	cfg, err := LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.Bridges[0].Enabled == nil || *cfg.Bridges[0].Enabled {
+		t.Errorf("want enabled: false preserved, got %+v", cfg.Bridges[0].Enabled)
+	}
+}

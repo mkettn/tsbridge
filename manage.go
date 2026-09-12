@@ -40,8 +40,11 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"tailscale.com/ipn/ipnstate"
 )
 
 // apiError carries an HTTP status code alongside an error message, so
@@ -69,8 +72,7 @@ func notFoundErr(format string, a ...any) error {
 // bridgeInfo is the management API's JSON view of a bridge -- BridgeConfig
 // plus Source (which has no place in a bridges: list itself: config.yaml
 // and managed-bridges.yaml don't tag their own entries, bridgeManager
-// does) and Running/Error, reporting a bridge that failed to start or
-// died of a fatal error without erasing it from the registry.
+// does), Enabled/Running/Error, and the bridge's dial health.
 type bridgeInfo struct {
 	Name        string `json:"name"`
 	Listen      string `json:"listen"`
@@ -81,10 +83,26 @@ type bridgeInfo struct {
 	// startup) or "managed" (added through this API, or loaded from
 	// managed-bridges.yaml at startup).
 	Source string `json:"source"`
-	// Running is false if this bridge failed to start, or started and
-	// later hit a fatal error; Error then explains why.
+	// Enabled reflects operator intent, independent of whether the
+	// bridge is currently Running: false means it was deliberately
+	// taken offline (Disable, or enabled: false in its source file) and
+	// has no socket. true with Running false instead means it's
+	// supposed to be up but isn't (failed to start, or a fatal error --
+	// Error explains which).
+	Enabled bool   `json:"enabled"`
 	Running bool   `json:"running"`
 	Error   string `json:"error,omitempty"`
+	// DialFailures/LastDialError/LastDialAt report Target's reachability
+	// as observed by this bridge's own traffic -- tsbridge never probes
+	// Target on its own, so these only update when something actually
+	// connects through the bridge, and a bridge with no traffic (or one
+	// that's Enabled false, or not Running) reports all zero/empty
+	// regardless of Target's actual state. DialFailures counts
+	// consecutive failures since the last successful dial (0 if the
+	// most recent dial succeeded, or none has happened yet).
+	DialFailures  int        `json:"dial_failures,omitempty"`
+	LastDialError string     `json:"last_dial_error,omitempty"`
+	LastDialAt    *time.Time `json:"last_dial_at,omitempty"`
 }
 
 // managedEntry is one bridge in bridgeManager's registry -- including a
@@ -125,12 +143,22 @@ type bridgeManager struct {
 	// managed, or added through the API -- may claim it as its own
 	// Listen path; see startAll and Add.
 	managementSocket string
+	// status fetches the tailnet connection's own current state, for
+	// GET /status. Set to a func wrapping srv.LocalClient().Status by
+	// main.go; tests substitute a fake.
+	status statusFunc
 
 	mu      sync.Mutex
 	entries map[string]*managedEntry
 }
 
-func newBridgeManager(ctx context.Context, dial dialFunc, sockMode os.FileMode, group, statePath, managementSocket string) *bridgeManager {
+// statusFunc fetches the tailnet connection's current status --
+// tsnet.Server.LocalClient().StatusWithoutPeers in production (see
+// main.go), matched by *local.Client's own method signature so main.go
+// can pass it in directly with no wrapping.
+type statusFunc func(ctx context.Context) (*ipnstate.Status, error)
+
+func newBridgeManager(ctx context.Context, dial dialFunc, sockMode os.FileMode, group, statePath, managementSocket string, status statusFunc) *bridgeManager {
 	return &bridgeManager{
 		ctx:              ctx,
 		dial:             dial,
@@ -138,6 +166,7 @@ func newBridgeManager(ctx context.Context, dial dialFunc, sockMode os.FileMode, 
 		group:            group,
 		statePath:        statePath,
 		managementSocket: managementSocket,
+		status:           status,
 		entries:          make(map[string]*managedEntry),
 	}
 }
@@ -184,14 +213,17 @@ func (m *bridgeManager) startAll(staticBridges []BridgeConfig) (started, attempt
 	for _, b := range staticBridges {
 		names[b.Name] = true
 		listens[b.Listen] = true
-		if m.startLocked(b, "config") {
+		s, a := m.startLocked(b, "config")
+		if s {
 			started++
 		}
-		attempted++
+		if a {
+			attempted++
+		}
 	}
 
 	for _, b := range managed {
-		normalizeBridgeMode(&b)
+		normalizeBridge(&b)
 		if err := validateBridgeFields(b); err != nil {
 			log.Printf("management: skipping invalid entry in %s: %v", m.statePath, err)
 			continue
@@ -214,33 +246,42 @@ func (m *bridgeManager) startAll(staticBridges []BridgeConfig) (started, attempt
 		}
 		names[b.Name] = true
 		listens[b.Listen] = true
-		if m.startLocked(b, "managed") {
+		s, a := m.startLocked(b, "managed")
+		if s {
 			started++
 		}
-		attempted++
+		if a {
+			attempted++
+		}
 	}
 	return started, attempted, nil
 }
 
-// startLocked starts cfg and registers it under source either way:
-// running (rb set) on success, or non-running with lastError set on
-// failure -- see managedEntry for why a failed one still gets an entry.
-// Callers must hold m.mu. Reports success via return value rather than
-// error: a failed bridge is logged and skipped, never fatal here (see
-// startAll and Add for why each caller treats that differently).
-func (m *bridgeManager) startLocked(cfg BridgeConfig, source string) bool {
+// startLocked registers cfg under source, starting it unless it's
+// disabled (enabled: false, in cfg or set explicitly). Callers must hold
+// m.mu. Reports outcome via return values rather than error -- a failed
+// or disabled bridge is registered (see managedEntry) rather than
+// treated as fatal here (see startAll and Add for why each caller treats
+// a *failure* differently) -- distinguishing whether it was actually
+// attempted, so startAll's caller can tell "nothing configured to run"
+// from "tried and failed".
+func (m *bridgeManager) startLocked(cfg BridgeConfig, source string) (started, attempted bool) {
+	if cfg.Enabled != nil && !*cfg.Enabled {
+		m.entries[cfg.Name] = &managedEntry{cfg: cfg, source: source}
+		return false, false
+	}
 	fatalCh := make(chan error, 1)
 	rb, err := startBridge(m.ctx, m.dial, cfg, m.sockMode, m.group, fatalCh)
 	if err != nil {
 		log.Printf("bridge %s: failed to start, skipping: %v", cfg.Name, err)
 		m.entries[cfg.Name] = &managedEntry{cfg: cfg, source: source, lastError: err}
-		return false
+		return false, true
 	}
 	done := make(chan struct{})
 	entry := &managedEntry{cfg: cfg, rb: rb, source: source, fatalDone: done}
 	m.entries[cfg.Name] = entry
 	go m.watchFatal(entry, fatalCh, done)
-	return true
+	return true, true
 }
 
 // watchFatal marks entry as no longer running if it ever reports a fatal
@@ -248,20 +289,26 @@ func (m *bridgeManager) startLocked(cfg BridgeConfig, source string) bool {
 // entry itself in the registry (see managedEntry) rather than deleting
 // it, so it stays visible and, if "managed", stays in
 // managed-bridges.yaml. It exits without doing anything if done closes
-// first, which means entry was already removed deliberately (Remove, or
-// process shutdown).
+// first, which means this bridge was already stopped deliberately
+// (Remove, Disable, or process shutdown).
 //
-// It compares identity (cur == entry), not just name, before touching
-// the registry: name alone isn't enough once a name can be reused (a
-// Remove immediately followed by an Add of the same name) while this
-// goroutine is still waiting on fatalCh from the *previous* bridge that
-// held that name -- keying on name alone would let a stale fatal signal
-// delete a brand new, healthy entry.
-func (m *bridgeManager) watchFatal(entry *managedEntry, fatalCh <-chan error, done <-chan struct{}) {
+// It checks two things before touching the registry, not just entry's
+// name: cur == entry (name alone isn't enough once a name can be
+// reused -- a Remove immediately followed by an Add of the same name
+// would otherwise let a stale fatal signal from the *previous* bridge
+// delete a brand new, healthy entry), and entry.fatalDone == done (entry
+// alone isn't enough either: unlike Remove, Disable/Enable reuse the
+// same *managedEntry across a stop/start cycle rather than allocating a
+// new one, only ever replacing its fatalDone channel -- so a fatal
+// signal already in flight from the bridge that was running *before* a
+// Disable can still match cur == entry after a later Enable started a
+// new one, and without this second check would incorrectly tear down
+// that new, unrelated bridge instead of being recognized as stale).
+func (m *bridgeManager) watchFatal(entry *managedEntry, fatalCh <-chan error, done chan struct{}) {
 	select {
 	case err := <-fatalCh:
 		m.mu.Lock()
-		if cur, ok := m.entries[entry.cfg.Name]; ok && cur == entry {
+		if cur, ok := m.entries[entry.cfg.Name]; ok && cur == entry && entry.fatalDone == done {
 			entry.rb = nil
 			entry.lastError = err
 			entry.fatalDone = nil
@@ -280,7 +327,7 @@ func (m *bridgeManager) watchFatal(entry *managedEntry, fatalCh <-chan error, do
 // handleAdd -- doesn't need to fabricate a managedEntry of its own just
 // to report Running/Source correctly.
 func (m *bridgeManager) Add(cfg BridgeConfig) (bridgeInfo, error) {
-	normalizeBridgeMode(&cfg)
+	normalizeBridge(&cfg)
 	if err := validateBridgeFields(cfg); err != nil {
 		return bridgeInfo{}, badRequest("%s", err)
 	}
@@ -306,15 +353,24 @@ func (m *bridgeManager) Add(cfg BridgeConfig) (bridgeInfo, error) {
 		}
 	}
 
-	fatalCh := make(chan error, 1)
-	rb, err := startBridge(m.ctx, m.dial, cfg, m.sockMode, m.group, fatalCh)
-	if err != nil {
-		return bridgeInfo{}, badRequest("starting bridge %q: %v", cfg.Name, err)
+	var entry *managedEntry
+	if *cfg.Enabled {
+		fatalCh := make(chan error, 1)
+		rb, err := startBridge(m.ctx, m.dial, cfg, m.sockMode, m.group, fatalCh)
+		if err != nil {
+			return bridgeInfo{}, badRequest("starting bridge %q: %v", cfg.Name, err)
+		}
+		done := make(chan struct{})
+		entry = &managedEntry{cfg: cfg, rb: rb, source: "managed", fatalDone: done}
+		go m.watchFatal(entry, fatalCh, done)
+	} else {
+		// enabled: false in the request body -- register it, but don't
+		// start it. Add's own listen-path-in-use check above still ran,
+		// so this reserves the name/path the same as a running bridge
+		// would, ready for a later Enable.
+		entry = &managedEntry{cfg: cfg, source: "managed"}
 	}
-	done := make(chan struct{})
-	entry := &managedEntry{cfg: cfg, rb: rb, source: "managed", fatalDone: done}
 	m.entries[cfg.Name] = entry
-	go m.watchFatal(entry, fatalCh, done)
 
 	if err := m.saveLocked(); err != nil {
 		// The bridge is live either way; a persistence failure means it
@@ -366,6 +422,104 @@ func (m *bridgeManager) Remove(name string) error {
 	return nil
 }
 
+// Disable ensures name is not running, and remembers that as intentional
+// (Enabled: false) -- unlike Remove, the bridge's config stays in the
+// registry, so Enable can bring it back without resupplying
+// listen/target/mode. Idempotent: a no-op, returning nil, if name is
+// already disabled. If it was running, this is what actually makes its
+// socket disappear -- see Remove's doc comment for why the registry is
+// updated (and, for a "managed" bridge, persisted) before the drain,
+// rather than holding m.mu for the whole thing.
+//
+// A "managed" bridge's disabled state is persisted (survives a
+// restart); a "config"-sourced one is runtime-only, the same as Remove
+// -- it comes back enabled on the next restart unless config.yaml's own
+// enabled: is also set to false.
+func (m *bridgeManager) Disable(name string) error {
+	m.mu.Lock()
+	entry, ok := m.entries[name]
+	if !ok {
+		m.mu.Unlock()
+		return notFoundErr("bridge %q not found", name)
+	}
+	if entry.rb == nil && entry.cfg.Enabled != nil && !*entry.cfg.Enabled {
+		m.mu.Unlock()
+		return nil // already disabled
+	}
+
+	rb := entry.rb
+	fatalDone := entry.fatalDone
+	disabled := false
+	entry.cfg.Enabled = &disabled
+	entry.rb = nil
+	entry.fatalDone = nil
+	entry.lastError = nil // it's offline on purpose now, not because of whatever it last failed with
+	if fatalDone != nil {
+		close(fatalDone)
+	}
+	var saveErr error
+	if entry.source == "managed" {
+		saveErr = m.saveLocked()
+	}
+	m.mu.Unlock()
+
+	if rb != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownDrainTimeout)
+		defer cancel()
+		rb.Shutdown(shutdownCtx)
+	}
+	if saveErr != nil {
+		log.Printf("management: bridge %q disabled but failed to update %s: %v", name, m.statePath, saveErr)
+	}
+	return nil
+}
+
+// Enable ensures name is running: starting it if it's disabled, or
+// retrying if it's enabled but currently down from a failure (Error
+// explained why). Idempotent: a no-op, returning nil, if it's already
+// running. Returns the same kind of error Add would if starting it now
+// fails (its listen path has since become unavailable, e.g.) -- Enabled
+// is left true either way, since the intent (it should be running) is
+// unchanged; only Disable turns that intent back off.
+func (m *bridgeManager) Enable(name string) error {
+	m.mu.Lock()
+	entry, ok := m.entries[name]
+	if !ok {
+		m.mu.Unlock()
+		return notFoundErr("bridge %q not found", name)
+	}
+	if entry.rb != nil {
+		m.mu.Unlock()
+		return nil // already running
+	}
+
+	enabled := true
+	entry.cfg.Enabled = &enabled
+	fatalCh := make(chan error, 1)
+	rb, err := startBridge(m.ctx, m.dial, entry.cfg, m.sockMode, m.group, fatalCh)
+	if err != nil {
+		entry.lastError = err
+		m.mu.Unlock()
+		return badRequest("starting bridge %q: %v", name, err)
+	}
+	done := make(chan struct{})
+	entry.rb = rb
+	entry.fatalDone = done
+	entry.lastError = nil
+	go m.watchFatal(entry, fatalCh, done)
+
+	var saveErr error
+	if entry.source == "managed" {
+		saveErr = m.saveLocked()
+	}
+	m.mu.Unlock()
+
+	if saveErr != nil {
+		log.Printf("management: bridge %q enabled but failed to update %s: %v", name, m.statePath, saveErr)
+	}
+	return nil
+}
+
 // Get returns the current info for one running bridge.
 func (m *bridgeManager) Get(name string) (bridgeInfo, error) {
 	m.mu.Lock()
@@ -397,10 +551,20 @@ func toBridgeInfo(e *managedEntry) bridgeInfo {
 		Mode:        e.cfg.Mode,
 		RewriteHost: e.cfg.RewriteHost,
 		Source:      e.source,
+		Enabled:     e.cfg.Enabled == nil || *e.cfg.Enabled,
 		Running:     e.rb != nil,
 	}
 	if e.lastError != nil {
 		info.Error = e.lastError.Error()
+	}
+	if hr, ok := e.rb.(healthReporter); ok {
+		h := hr.dialHealth()
+		info.DialFailures = h.ConsecutiveFailures
+		info.LastDialError = h.LastError
+		if !h.LastAttempt.IsZero() {
+			t := h.LastAttempt
+			info.LastDialAt = &t
+		}
 	}
 	return info
 }
@@ -514,17 +678,56 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 
 // Handler returns the management API's HTTP handler:
 //
-//	GET    /bridges       -> list every running bridge
-//	POST   /bridges       -> add a bridge (body: BridgeConfig JSON)
-//	GET    /bridges/{name}    -> one bridge's info
-//	DELETE /bridges/{name}    -> stop and remove one bridge
+//	GET    /status                 -> the tailnet connection's own state
+//	GET    /bridges                -> list every bridge tsbridge knows about
+//	POST   /bridges                -> add a bridge (body: BridgeConfig JSON)
+//	GET    /bridges/{name}         -> one bridge's info
+//	DELETE /bridges/{name}         -> stop and forget one bridge
+//	POST   /bridges/{name}/disable -> take one bridge offline, remembered
+//	POST   /bridges/{name}/enable  -> bring one bridge back (or retry a failed one)
 func (m *bridgeManager) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /status", m.handleStatus)
 	mux.HandleFunc("GET /bridges", m.handleList)
 	mux.HandleFunc("POST /bridges", m.handleAdd)
 	mux.HandleFunc("GET /bridges/{name}", m.handleGet)
 	mux.HandleFunc("DELETE /bridges/{name}", m.handleRemove)
+	mux.HandleFunc("POST /bridges/{name}/disable", m.handleDisable)
+	mux.HandleFunc("POST /bridges/{name}/enable", m.handleEnable)
 	return mux
+}
+
+// statusInfo is GET /status's JSON body -- the subset of tsnet's own
+// ipnstate.Status that's useful for confirming the tailnet connection
+// itself (as opposed to any one bridge) is up.
+type statusInfo struct {
+	// BackendState is one of tsnet/tailscaled's own state names:
+	// "NoState", "NeedsLogin", "NeedsMachineAuth", "Stopped", "Starting",
+	// "Running". Bridges can only actually reach their targets when
+	// this is "Running".
+	BackendState string   `json:"backend_state"`
+	TailscaleIPs []string `json:"tailscale_ips,omitempty"`
+	Tailnet      string   `json:"tailnet,omitempty"`
+	// Health lists active problems tailscaled itself has detected
+	// (expired key, DNS misconfiguration, etc.) -- empty means none
+	// known, not necessarily that everything is fine.
+	Health []string `json:"health,omitempty"`
+}
+
+func (m *bridgeManager) handleStatus(w http.ResponseWriter, r *http.Request) {
+	st, err := m.status(r.Context())
+	if err != nil {
+		writeError(w, fmt.Errorf("fetching tailnet status: %w", err))
+		return
+	}
+	info := statusInfo{BackendState: st.BackendState, Health: st.Health}
+	for _, ip := range st.TailscaleIPs {
+		info.TailscaleIPs = append(info.TailscaleIPs, ip.String())
+	}
+	if st.CurrentTailnet != nil {
+		info.Tailnet = st.CurrentTailnet.Name
+	}
+	writeJSON(w, http.StatusOK, info)
 }
 
 func (m *bridgeManager) handleList(w http.ResponseWriter, r *http.Request) {
@@ -563,6 +766,35 @@ func (m *bridgeManager) handleRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (m *bridgeManager) handleDisable(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := m.Disable(name); err != nil {
+		writeError(w, err)
+		return
+	}
+	m.writeBridge(w, name)
+}
+
+func (m *bridgeManager) handleEnable(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if err := m.Enable(name); err != nil {
+		writeError(w, err)
+		return
+	}
+	m.writeBridge(w, name)
+}
+
+// writeBridge writes name's current bridgeInfo as the response body, for
+// handlers whose mutation (Disable/Enable) doesn't itself return one.
+func (m *bridgeManager) writeBridge(w http.ResponseWriter, name string) {
+	info, err := m.Get(name)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, info)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
@@ -608,5 +840,9 @@ func startManagementServer(path string, mode os.FileMode, group string, m *bridg
 		}
 	}()
 
-	return &httpBridge{srv: srv, l: l, cancel: cancel}, nil
+	// health is never used (the management server doesn't implement
+	// healthReporter's *bridge*-specific concern -- it doesn't dial a
+	// Target at all), but httpBridge.dialHealth() dereferences it
+	// unconditionally, so it still needs a non-nil value here.
+	return &httpBridge{srv: srv, l: l, cancel: cancel, health: &dialHealth{}}, nil
 }
