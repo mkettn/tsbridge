@@ -431,6 +431,57 @@ func TestBridgeManager_WatchFatalIgnoresStaleSignalAfterNameReuse(t *testing.T) 
 	}
 }
 
+// The bug this guards against: unlike Remove (which deletes the entry,
+// so a later Add allocates a new *managedEntry the identity check above
+// can tell apart from a stale watcher), Disable/Enable reuse the same
+// *managedEntry across a stop/start cycle, only ever replacing its
+// fatalDone channel. That means cur == entry alone stays true across a
+// disable/enable cycle, so a fatal signal already in flight from the
+// bridge instance that was running *before* the Disable can still match
+// it after a later Enable started a new, unrelated instance --
+// incorrectly tearing that new one down. watchFatal also has to check
+// that entry.fatalDone is still the specific channel this watcher was
+// given.
+func TestBridgeManager_WatchFatalIgnoresStaleSignalAfterDisableEnable(t *testing.T) {
+	m, _ := newTestManager(t)
+
+	oldFatalCh := make(chan error, 1)
+	oldDone := make(chan struct{})
+	entry := &managedEntry{
+		cfg:       BridgeConfig{Name: "svc", Listen: "/svc.sock", Target: "t:1", Mode: "tcp"},
+		rb:        &blockingBridge{release: make(chan struct{})},
+		source:    "managed",
+		fatalDone: oldDone,
+	}
+	m.mu.Lock()
+	m.entries["svc"] = entry
+	m.mu.Unlock()
+	go m.watchFatal(entry, oldFatalCh, oldDone)
+
+	// Simulate Disable immediately followed by Enable: same *managedEntry,
+	// but a new rb/fatalDone, exactly what the real Disable/Enable do --
+	// without closing oldDone, the exact race window at issue.
+	newRb := &blockingBridge{release: make(chan struct{})}
+	m.mu.Lock()
+	entry.rb = newRb
+	entry.fatalDone = make(chan struct{})
+	m.mu.Unlock()
+
+	// The bridge instance from before the disable reports its fatal
+	// error late, after the re-enable above.
+	oldFatalCh <- errors.New("stale fatal from before disable")
+
+	// Give the stale watcher goroutine a chance to (wrongly) act.
+	time.Sleep(100 * time.Millisecond)
+
+	m.mu.Lock()
+	cur := m.entries["svc"]
+	m.mu.Unlock()
+	if cur.rb != newRb {
+		t.Fatalf("a stale fatal signal from before Disable clobbered the re-Enabled bridge: rb=%v lastError=%v", cur.rb, cur.lastError)
+	}
+}
+
 // waitFor polls cond until it's true or 2 seconds pass, failing the test
 // on timeout. Used for assertions that depend on a background goroutine
 // (watchFatal) having run.

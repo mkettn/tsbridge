@@ -289,20 +289,26 @@ func (m *bridgeManager) startLocked(cfg BridgeConfig, source string) (started, a
 // entry itself in the registry (see managedEntry) rather than deleting
 // it, so it stays visible and, if "managed", stays in
 // managed-bridges.yaml. It exits without doing anything if done closes
-// first, which means entry was already removed deliberately (Remove, or
-// process shutdown).
+// first, which means this bridge was already stopped deliberately
+// (Remove, Disable, or process shutdown).
 //
-// It compares identity (cur == entry), not just name, before touching
-// the registry: name alone isn't enough once a name can be reused (a
-// Remove immediately followed by an Add of the same name) while this
-// goroutine is still waiting on fatalCh from the *previous* bridge that
-// held that name -- keying on name alone would let a stale fatal signal
-// delete a brand new, healthy entry.
-func (m *bridgeManager) watchFatal(entry *managedEntry, fatalCh <-chan error, done <-chan struct{}) {
+// It checks two things before touching the registry, not just entry's
+// name: cur == entry (name alone isn't enough once a name can be
+// reused -- a Remove immediately followed by an Add of the same name
+// would otherwise let a stale fatal signal from the *previous* bridge
+// delete a brand new, healthy entry), and entry.fatalDone == done (entry
+// alone isn't enough either: unlike Remove, Disable/Enable reuse the
+// same *managedEntry across a stop/start cycle rather than allocating a
+// new one, only ever replacing its fatalDone channel -- so a fatal
+// signal already in flight from the bridge that was running *before* a
+// Disable can still match cur == entry after a later Enable started a
+// new one, and without this second check would incorrectly tear down
+// that new, unrelated bridge instead of being recognized as stale).
+func (m *bridgeManager) watchFatal(entry *managedEntry, fatalCh <-chan error, done chan struct{}) {
 	select {
 	case err := <-fatalCh:
 		m.mu.Lock()
-		if cur, ok := m.entries[entry.cfg.Name]; ok && cur == entry {
+		if cur, ok := m.entries[entry.cfg.Name]; ok && cur == entry && entry.fatalDone == done {
 			entry.rb = nil
 			entry.lastError = err
 			entry.fatalDone = nil
