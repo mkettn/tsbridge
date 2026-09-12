@@ -446,3 +446,68 @@ func TestStartHTTPBridge_ShutdownAlwaysUnlinksSocket(t *testing.T) {
 		}
 	}
 }
+
+// A runtime removal (the management API's DELETE /bridges/{name}, see
+// manage.go) calls Shutdown while the *process*'s own ctx is still very
+// much alive -- only the individual bridge is going away, nothing else.
+// acceptLoop must recognize that as deliberate rather than reporting it
+// on fatal: the ctx passed to startBridge is process-lifetime, so
+// checking only *that* ctx's Err() (as acceptLoop used to) can't tell a
+// runtime removal apart from a real crash. Shutdown now cancels a
+// child context scoped to the one bridge, which acceptLoop's existing
+// check already handles correctly once that's what it's looking at.
+func TestStartBridge_RuntimeShutdownDoesNotReportFatal(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "removed.sock")
+
+	// Deliberately not cancelled before Shutdown -- this is the whole
+	// point: the process (and every other bridge) is still running.
+	processCtx, stopProcess := context.WithCancel(context.Background())
+	defer stopProcess()
+
+	b := BridgeConfig{Name: "removed", Listen: sockPath, Target: "example.invalid:1", Mode: "tcp"}
+	fatal := make(chan error, 1)
+	rb, err := startBridge(processCtx, failDial, b, 0660, "", fatal)
+	if err != nil {
+		t.Fatalf("startBridge: %v", err)
+	}
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelShutdown()
+	rb.Shutdown(shutdownCtx)
+
+	select {
+	case err := <-fatal:
+		t.Fatalf("a runtime Shutdown (process ctx still alive) should not report a fatal error, got: %v", err)
+	default:
+	}
+}
+
+// Same as above, for mode: http -- Serve returning exactly
+// http.ErrServerClosed already covered this case before the ctx-cancel
+// fix, but this pins that it stays true now that Shutdown cancels its
+// own ctx too.
+func TestStartHTTPBridge_RuntimeShutdownDoesNotReportFatal(t *testing.T) {
+	dir := t.TempDir()
+	sockPath := filepath.Join(dir, "removed-http.sock")
+
+	processCtx, stopProcess := context.WithCancel(context.Background())
+	defer stopProcess()
+
+	b := BridgeConfig{Name: "removed-http", Listen: sockPath, Target: "example.invalid:1", Mode: "http"}
+	fatal := make(chan error, 1)
+	rb, err := startBridge(processCtx, failDial, b, 0660, "", fatal)
+	if err != nil {
+		t.Fatalf("startBridge: %v", err)
+	}
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelShutdown()
+	rb.Shutdown(shutdownCtx)
+
+	select {
+	case err := <-fatal:
+		t.Fatalf("a runtime Shutdown (process ctx still alive) should not report a fatal error, got: %v", err)
+	default:
+	}
+}

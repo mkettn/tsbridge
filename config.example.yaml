@@ -42,6 +42,26 @@ ephemeral: false
 # omitted.
 socket_mode: "0660"
 
+# Unix socket for the runtime management API: add and remove bridges
+# while tsbridge keeps running, instead of editing this file and
+# restarting. Leave unset (the default) to disable it entirely -- no
+# socket is created and bridges can only come from bridges: below.
+#
+# Bridges added through the API are persisted to
+# state_dir/managed-bridges.yaml (hence state_dir being required once
+# this is set) and merged in alongside bridges: below on every restart;
+# see README.md's "Runtime bridge management" section for the request
+# format and the full add/remove/restart semantics.
+#
+# This socket can create and remove bridges to arbitrary tailnet targets
+# -- a much bigger blast radius than any single bridge socket -- so it
+# defaults to "0600" (owner-only) rather than socket_mode's "0660", and
+# has its own independent group setting below rather than reusing
+# socket_group.
+# management_socket: /run/tsbridge/control.sock
+# management_socket_mode: "0600"
+# management_socket_group: admins
+
 # All bridges this instance serves. Each maps a local Unix socket to a
 # host:port reachable over the tailnet. `mode` is optional and defaults
 # to "tcp" (raw byte copy, protocol-agnostic) -- "http" is the other

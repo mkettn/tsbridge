@@ -1,23 +1,41 @@
-# Serves the tsbridge Unix socket from config.yaml (in this same
-# directory) on http://localhost:1234.
+# Serves two things from config.yaml (in this same directory):
 #
-# Run from inside this directory so the relative socket path below
-# resolves against it, matching config.yaml's `listen:`:
+#   http://localhost:1234 -- the example-service bridge's Unix socket.
+#   http://localhost:1235 -- the management API (management_socket) plus
+#                             a small HTML UI (www/index.html) for it.
+#
+# Run from inside this directory so the relative socket paths below
+# resolve against it, matching config.yaml's `listen:`/`management_socket:`:
 #
 #   caddy run
 #
 # tsbridge (pointed at config.yaml here) needs to be running first so
-# the socket exists -- Caddy will otherwise return a 502 until it does.
+# both sockets exist -- Caddy will otherwise return a 502 until they do.
 #
-# The address below is explicitly "http://localhost:1234", not just
-# "localhost:1234": a bare hostname address makes Caddy enable automatic
+# Both addresses below are explicitly "http://localhost:...", not just
+# "localhost:...": a bare hostname address makes Caddy enable automatic
 # HTTPS, and since "localhost" isn't a publicly issuable domain, Caddy
 # falls back to minting a cert from its own internal CA and asks to
 # install that CA into your system trust store (root password prompt
 # included) to avoid a browser warning. The explicit http:// scheme
-# turns automatic HTTPS off for this site entirely, so plain HTTP is
+# turns automatic HTTPS off for these sites entirely, so plain HTTP is
 # served with no certificate and no elevated privileges needed.
 
 http://localhost:1234 {
 	reverse_proxy unix/tsbridge-example.sock
+}
+
+# www/index.html talks to /bridges on this same origin (see its own
+# comment for why that matters), so the API is reverse-proxied on the
+# same site as the UI rather than a separate port -- no CORS to set up.
+#
+# root is scoped to www/, not this directory -- config.yaml, state/
+# (which holds this node's tsnet identity keys) and the socket files all
+# live one level up, outside what file_server can ever reach here.
+http://localhost:1235 {
+	@api path /bridges /bridges/*
+	reverse_proxy @api unix/tsbridge-example-control.sock
+
+	root * www
+	file_server
 }

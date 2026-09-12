@@ -15,8 +15,18 @@ import (
 
 const defaultSocketMode os.FileMode = 0660
 
+// defaultManagementSocketMode is more restrictive than defaultSocketMode:
+// the management socket can create and remove bridges to arbitrary
+// tailnet targets, a much bigger blast radius than any single bridge
+// socket, so it defaults to owner-only rather than owner+group.
+const defaultManagementSocketMode os.FileMode = 0600
+
 // defaultBridgeMode is used when a bridge doesn't set mode:.
 const defaultBridgeMode = "tcp"
+
+// managedBridgesFileName is the state_dir file the management API
+// persists its own bridges to -- see manage.go.
+const managedBridgesFileName = "managed-bridges.yaml"
 
 // supportedBridgeModes are the values checkBridges accepts for mode:.
 var supportedBridgeModes = map[string]bool{
@@ -24,45 +34,54 @@ var supportedBridgeModes = map[string]bool{
 	"http": true, // terminate HTTP and reverse-proxy to target
 }
 
-// BridgeConfig is one listen-socket -> tailnet-target mapping.
+// BridgeConfig is one listen-socket -> tailnet-target mapping. It doubles
+// as the management API's JSON request/response body and the schema of
+// managed-bridges.yaml (see manage.go) -- both are "just another bridges:
+// list" in the same shape as config.yaml's.
 type BridgeConfig struct {
-	Name   string `yaml:"name"`
-	Listen string `yaml:"listen"`
-	Target string `yaml:"target"`
+	Name   string `yaml:"name" json:"name"`
+	Listen string `yaml:"listen" json:"listen"`
+	Target string `yaml:"target" json:"target"`
 	// Mode selects how tsbridge handles the connection, not what network
 	// it dials on the tailnet side -- that's always TCP regardless of
 	// Mode. "tcp" (the default if unset) does a raw bidirectional byte
 	// copy; "http" terminates HTTP on the socket and reverse-proxies
 	// each request to Target instead.
-	Mode string `yaml:"mode"`
+	Mode string `yaml:"mode" json:"mode"`
 	// RewriteHost only applies to mode: http (rejected on any other
 	// mode). false (the default) forwards the request to Target with
 	// whatever Host header the client sent unchanged. true rewrites it
 	// to Target's own host:port instead -- needed for a target that
 	// routes or validates by hostname (tailscale serve, notably).
-	RewriteHost bool `yaml:"rewrite_host"`
+	RewriteHost bool `yaml:"rewrite_host" json:"rewrite_host"`
 }
 
 // Config is the fully resolved, validated configuration used at runtime.
 type Config struct {
-	Hostname    string
-	StateDir    string
-	Ephemeral   bool
-	ControlURL  string
-	SocketGroup string
-	SocketMode  os.FileMode
-	Bridges     []BridgeConfig
+	Hostname              string
+	StateDir              string
+	Ephemeral             bool
+	ControlURL            string
+	SocketGroup           string
+	SocketMode            os.FileMode
+	ManagementSocket      string
+	ManagementSocketGroup string
+	ManagementSocketMode  os.FileMode
+	Bridges               []BridgeConfig
 }
 
 // rawConfig mirrors the config.yaml schema.
 type rawConfig struct {
-	Hostname    string         `yaml:"hostname"`
-	StateDir    string         `yaml:"state_dir"`
-	Ephemeral   *bool          `yaml:"ephemeral"`
-	ControlURL  string         `yaml:"control_url"`
-	SocketGroup string         `yaml:"socket_group"`
-	SocketMode  string         `yaml:"socket_mode"`
-	Bridges     []BridgeConfig `yaml:"bridges"`
+	Hostname              string         `yaml:"hostname"`
+	StateDir              string         `yaml:"state_dir"`
+	Ephemeral             *bool          `yaml:"ephemeral"`
+	ControlURL            string         `yaml:"control_url"`
+	SocketGroup           string         `yaml:"socket_group"`
+	SocketMode            string         `yaml:"socket_mode"`
+	ManagementSocket      string         `yaml:"management_socket"`
+	ManagementSocketGroup string         `yaml:"management_socket_group"`
+	ManagementSocketMode  string         `yaml:"management_socket_mode"`
+	Bridges               []BridgeConfig `yaml:"bridges"`
 }
 
 // LoadConfig reads and validates the config file at path. Any error
@@ -95,6 +114,40 @@ func LoadConfig(path string) (*Config, error) {
 		}
 	}
 
+	stateDir := resolvePath(baseDir, raw.StateDir)
+
+	managementSocket := resolvePath(baseDir, raw.ManagementSocket)
+	managementMode := defaultManagementSocketMode
+	if managementSocket != "" {
+		if raw.ManagementSocketMode != "" {
+			managementMode, err = parseSocketMode(raw.ManagementSocketMode)
+			if err != nil {
+				return nil, fmt.Errorf("management_socket_mode: %w", err)
+			}
+		} else if raw.ManagementSocketGroup != "" {
+			// The default mode is owner-only (0600), which grants the
+			// group nothing -- so management_socket_group alone would
+			// silently do nothing: the socket gets chowned to that
+			// group, but its permission bits still don't let the group
+			// use it. socket_group doesn't have this problem since its
+			// own default (0660) already grants the group access.
+			return nil, fmt.Errorf("management_socket_group is set but management_socket_mode is not: "+
+				"the default %#o gives the group no access -- set a mode that does, e.g. \"0660\"", defaultManagementSocketMode)
+		}
+		if stateDir == "" {
+			return nil, fmt.Errorf("management_socket requires state_dir to be set -- it's where managed bridges (%s) are persisted", managedBridgesFileName)
+		}
+		for _, b := range bridges {
+			if b.Listen == managementSocket {
+				return nil, fmt.Errorf("management_socket %q collides with bridge %q's listen path", managementSocket, b.Name)
+			}
+		}
+	} else if raw.ManagementSocketMode != "" {
+		return nil, fmt.Errorf("management_socket_mode is set but management_socket is empty")
+	} else if raw.ManagementSocketGroup != "" {
+		return nil, fmt.Errorf("management_socket_group is set but management_socket is empty")
+	}
+
 	if raw.ControlURL != "" {
 		if err := validateControlURL(raw.ControlURL); err != nil {
 			return nil, fmt.Errorf("control_url: %w", err)
@@ -112,13 +165,16 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	return &Config{
-		Hostname:    hostname,
-		StateDir:    resolvePath(baseDir, raw.StateDir),
-		Ephemeral:   ephemeral,
-		ControlURL:  raw.ControlURL,
-		SocketGroup: raw.SocketGroup,
-		SocketMode:  mode,
-		Bridges:     bridges,
+		Hostname:              hostname,
+		StateDir:              stateDir,
+		Ephemeral:             ephemeral,
+		ControlURL:            raw.ControlURL,
+		SocketGroup:           raw.SocketGroup,
+		SocketMode:            mode,
+		ManagementSocket:      managementSocket,
+		ManagementSocketGroup: raw.ManagementSocketGroup,
+		ManagementSocketMode:  managementMode,
+		Bridges:               bridges,
 	}, nil
 }
 
@@ -146,26 +202,38 @@ func readRawConfig(path string) (*rawConfig, error) {
 	return &cfg, nil
 }
 
+// validateBridgeFields checks one bridge's own fields in isolation --
+// required fields present, mode supported, rewrite_host only where it
+// applies. It doesn't know about any other bridge, so duplicate name/listen
+// checks live in checkBridges (the static list) and bridgeManager.Add (a
+// single new bridge against whatever's currently running) instead.
+func validateBridgeFields(b BridgeConfig) error {
+	if b.Name == "" {
+		return fmt.Errorf("a bridge is missing required field 'name'")
+	}
+	if b.Listen == "" {
+		return fmt.Errorf("bridge %q is missing required field 'listen'", b.Name)
+	}
+	if b.Target == "" {
+		return fmt.Errorf("bridge %q is missing required field 'target'", b.Name)
+	}
+	if !supportedBridgeModes[b.Mode] {
+		return fmt.Errorf("bridge %q has unsupported mode %q; supported modes are tcp, http", b.Name, b.Mode)
+	}
+	if b.RewriteHost && b.Mode != "http" {
+		return fmt.Errorf("bridge %q sets rewrite_host, but that only applies to mode: http (bridge is mode: %s)", b.Name, b.Mode)
+	}
+	return nil
+}
+
 // checkBridges validates required fields and rejects duplicate names or
-// listen paths.
+// listen paths across the whole list.
 func checkBridges(bridges []BridgeConfig) error {
 	names := map[string]bool{}
 	listens := map[string]bool{}
 	for _, b := range bridges {
-		if b.Name == "" {
-			return fmt.Errorf("a bridge is missing required field 'name'")
-		}
-		if b.Listen == "" {
-			return fmt.Errorf("bridge %q is missing required field 'listen'", b.Name)
-		}
-		if b.Target == "" {
-			return fmt.Errorf("bridge %q is missing required field 'target'", b.Name)
-		}
-		if !supportedBridgeModes[b.Mode] {
-			return fmt.Errorf("bridge %q has unsupported mode %q; supported modes are tcp, http", b.Name, b.Mode)
-		}
-		if b.RewriteHost && b.Mode != "http" {
-			return fmt.Errorf("bridge %q sets rewrite_host, but that only applies to mode: http (bridge is mode: %s)", b.Name, b.Mode)
+		if err := validateBridgeFields(b); err != nil {
+			return err
 		}
 		if names[b.Name] {
 			return fmt.Errorf("duplicate bridge name %q", b.Name)
@@ -177,6 +245,17 @@ func checkBridges(bridges []BridgeConfig) error {
 		listens[b.Listen] = true
 	}
 	return nil
+}
+
+// normalizeBridgeMode lowercases/trims Mode and fills in the default when
+// empty, matching what LoadConfig does for bridges loaded from
+// config.yaml. Used by bridgeManager.Add so a bridge submitted through the
+// management API is normalized the same way.
+func normalizeBridgeMode(b *BridgeConfig) {
+	b.Mode = strings.ToLower(strings.TrimSpace(b.Mode))
+	if b.Mode == "" {
+		b.Mode = defaultBridgeMode
+	}
 }
 
 // validateControlURL rejects a control_url that isn't a usable absolute

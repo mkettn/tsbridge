@@ -316,4 +316,119 @@ bridges: []
 	if cfg.SocketMode != defaultSocketMode {
 		t.Errorf("want default socket mode %v, got %v", defaultSocketMode, cfg.SocketMode)
 	}
+	if cfg.ManagementSocket != "" {
+		t.Errorf("want empty management_socket by default, got %q", cfg.ManagementSocket)
+	}
+}
+
+func TestLoadConfig_ManagementSocketDefaultsAndResolvesPath(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), `
+state_dir: state
+management_socket: control.sock
+bridges: []
+`)
+	cfg, err := LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if want := filepath.Join(dir, "control.sock"); cfg.ManagementSocket != want {
+		t.Errorf("want management_socket resolved to %q, got %q", want, cfg.ManagementSocket)
+	}
+	if cfg.ManagementSocketMode != defaultManagementSocketMode {
+		t.Errorf("want default management_socket_mode %v, got %v", defaultManagementSocketMode, cfg.ManagementSocketMode)
+	}
+}
+
+func TestLoadConfig_ManagementSocketCustomMode(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), `
+state_dir: state
+management_socket: control.sock
+management_socket_mode: "0640"
+management_socket_group: admins
+bridges: []
+`)
+	cfg, err := LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if cfg.ManagementSocketMode != 0640 {
+		t.Errorf("want management_socket_mode 0640, got %v", cfg.ManagementSocketMode)
+	}
+	if cfg.ManagementSocketGroup != "admins" {
+		t.Errorf("want management_socket_group %q, got %q", "admins", cfg.ManagementSocketGroup)
+	}
+}
+
+func TestLoadConfig_ManagementSocketRequiresStateDir(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), `
+ephemeral: true
+management_socket: control.sock
+bridges: []
+`)
+	_, err := LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err == nil || !strings.Contains(err.Error(), "state_dir") {
+		t.Fatalf("want error requiring state_dir, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ManagementSocketCollidesWithBridgeListen(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), `
+state_dir: state
+management_socket: /run/tsbridge/shared.sock
+bridges:
+  - name: svc
+    listen: /run/tsbridge/shared.sock
+    target: host:1
+`)
+	_, err := LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err == nil || !strings.Contains(err.Error(), "collides") {
+		t.Fatalf("want collision error, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ManagementSocketModeWithoutSocketRejected(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), `
+management_socket_mode: "0640"
+bridges: []
+`)
+	_, err := LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err == nil || !strings.Contains(err.Error(), "management_socket_mode") {
+		t.Fatalf("want error naming management_socket_mode, got: %v", err)
+	}
+}
+
+func TestLoadConfig_ManagementSocketGroupWithoutSocketRejected(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), `
+management_socket_group: admins
+bridges: []
+`)
+	_, err := LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err == nil || !strings.Contains(err.Error(), "management_socket_group") {
+		t.Fatalf("want error naming management_socket_group, got: %v", err)
+	}
+}
+
+// management_socket's default mode (0600, owner-only) gives the group
+// nothing, so setting management_socket_group without also setting an
+// explicit management_socket_mode would silently grant no access at all
+// -- reject it instead of leaving a socket that looks configured for
+// group access and isn't.
+func TestLoadConfig_ManagementSocketGroupWithoutModeRejected(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), `
+state_dir: state
+management_socket: control.sock
+management_socket_group: admins
+bridges: []
+`)
+	_, err := LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err == nil || !strings.Contains(err.Error(), "management_socket_mode") {
+		t.Fatalf("want error naming the missing management_socket_mode, got: %v", err)
+	}
 }
