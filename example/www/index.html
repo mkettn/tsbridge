@@ -48,21 +48,30 @@
   .checkbox-field label { margin: 0; }
   button { padding: .4rem .9rem; font: inherit; cursor: pointer; }
   button.remove { color: #c0362c; border-color: currentColor; background: none; border-radius: .35rem; }
+  .row-actions { display: flex; gap: .4rem; }
+  .row-actions button { padding: .3rem .6rem; font-size: .82rem; }
   #error { color: #c0362c; white-space: pre-wrap; font-size: .88rem; margin: .75rem 0; }
   #error:empty { display: none; }
+  #status { display: flex; flex-wrap: wrap; gap: .4rem .6rem; align-items: center; margin: 1rem 0; font-size: .88rem; }
+  #status .badge.ok { border-color: #2a8f4d; color: #2a8f4d; }
+  #status .badge.warn { border-color: #c0362c; color: #c0362c; }
+  .state-off { opacity: .55; }
+  .state-error { color: #c0362c; }
+  small.hint { opacity: .6; }
 </style>
 </head>
 <body>
 <h1>tsbridge bridges</h1>
-<p class="sub">Talking to <code>/bridges</code> on this origin, proxied by Caddy to tsbridge's <code>management_socket</code>.</p>
+<p class="sub">Talking to <code>/bridges</code> and <code>/status</code> on this origin, proxied by Caddy to tsbridge's <code>management_socket</code>.</p>
 
+<div id="status"></div>
 <div id="error"></div>
 
 <table>
   <thead>
-    <tr><th>Name</th><th>Mode</th><th>Source</th><th>Listen</th><th>Target</th><th></th></tr>
+    <tr><th>Name</th><th>Mode</th><th>Source</th><th>State</th><th>Listen</th><th>Target</th><th></th></tr>
   </thead>
-  <tbody id="rows"><tr><td colspan="6" class="empty">loading&hellip;</td></tr></tbody>
+  <tbody id="rows"><tr><td colspan="7" class="empty">loading&hellip;</td></tr></tbody>
 </table>
 
 <fieldset>
@@ -91,6 +100,10 @@
       <input type="checkbox" id="f-rewrite-host">
       <label for="f-rewrite-host">rewrite_host (http only)</label>
     </div>
+    <div class="checkbox-field">
+      <input type="checkbox" id="f-enabled" checked>
+      <label for="f-enabled">enabled</label>
+    </div>
     <div>
       <button type="submit">Add bridge</button>
     </div>
@@ -102,6 +115,7 @@
 
 const rowsEl = document.getElementById("rows");
 const errorEl = document.getElementById("error");
+const statusEl = document.getElementById("status");
 const form = document.getElementById("add-form");
 
 function showError(message) {
@@ -128,7 +142,35 @@ function el(tag, props, children) {
   return node;
 }
 
+// stateCell describes bridge's State column: text plus a class for
+// styling (state-off for a deliberately disabled bridge, state-error
+// for a crashed/failed one), and an optional hint (dial health) shown
+// underneath.
+function stateCell(bridge) {
+  let text, className = "";
+  if (!bridge.enabled) {
+    text = "disabled";
+    className = "state-off";
+  } else if (bridge.running) {
+    text = "running";
+  } else {
+    text = "not running";
+    className = "state-error";
+  }
+  const children = [document.createTextNode(text)];
+  if (bridge.error) {
+    children.push(el("br"), el("small", { className: "hint", textContent: bridge.error }));
+  } else if (bridge.dial_failures > 0) {
+    children.push(el("br"), el("small", { className: "hint", textContent: `${bridge.dial_failures} dial failure(s): ${bridge.last_dial_error}` }));
+  }
+  return el("td", { className }, children);
+}
+
 function renderRow(bridge) {
+  const toggleBtn = el("button", {
+    textContent: bridge.enabled ? "Disable" : "Enable",
+    onclick: () => toggleBridge(bridge),
+  });
   const removeBtn = el("button", {
     className: "remove",
     textContent: "Remove",
@@ -138,13 +180,37 @@ function renderRow(bridge) {
     el("td", {}, [el("code", { textContent: bridge.name })]),
     el("td", { textContent: bridge.mode + (bridge.mode === "http" && bridge.rewrite_host ? " (rewrite_host)" : "") }),
     el("td", {}, [el("span", { className: "badge", textContent: bridge.source })]),
+    stateCell(bridge),
     el("td", {}, [el("code", { textContent: bridge.listen })]),
     el("td", {}, [el("code", { textContent: bridge.target })]),
-    el("td", {}, [removeBtn]),
+    el("td", {}, [el("div", { className: "row-actions" }, [toggleBtn, removeBtn])]),
   ]);
 }
 
+async function refreshStatus() {
+  try {
+    const res = await fetch("/status");
+    if (!res.ok) throw new Error(await messageFromResponse(res));
+    const st = await res.json();
+    const stateBadge = el("span", {
+      className: "badge " + (st.backend_state === "Running" ? "ok" : "warn"),
+      textContent: st.backend_state,
+    });
+    const children = [stateBadge];
+    if (st.tailnet) children.push(document.createTextNode(st.tailnet));
+    if (st.tailscale_ips && st.tailscale_ips.length) children.push(el("code", { textContent: st.tailscale_ips.join(", ") }));
+    for (const warning of st.health || []) {
+      children.push(el("span", { className: "badge warn", textContent: warning }));
+    }
+    statusEl.replaceChildren(...children);
+  } catch (err) {
+    statusEl.replaceChildren(el("span", { className: "badge warn", textContent: `status unavailable: ${err.message || err}` }));
+  }
+}
+
 async function refresh() {
+  refreshStatus();
+
   let bridges;
   try {
     const res = await fetch("/bridges");
@@ -158,7 +224,7 @@ async function refresh() {
 
   rowsEl.replaceChildren();
   if (!bridges || bridges.length === 0) {
-    rowsEl.append(el("tr", {}, [el("td", { colSpan: 6, className: "empty", textContent: "no bridges running" })]));
+    rowsEl.append(el("tr", {}, [el("td", { colSpan: 7, className: "empty", textContent: "no bridges running" })]));
     return;
   }
   bridges.sort((a, b) => a.name.localeCompare(b.name));
@@ -175,6 +241,17 @@ async function removeBridge(name) {
   refresh();
 }
 
+async function toggleBridge(bridge) {
+  const action = bridge.enabled ? "disable" : "enable";
+  try {
+    const res = await fetch(`/bridges/${encodeURIComponent(bridge.name)}/${action}`, { method: "POST" });
+    if (!res.ok) throw new Error(`${action}ing ${bridge.name}: ${await messageFromResponse(res)}`);
+  } catch (err) {
+    showError(String(err.message || err));
+  }
+  refresh();
+}
+
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const body = {
@@ -183,6 +260,7 @@ form.addEventListener("submit", async (event) => {
     target: document.getElementById("f-target").value.trim(),
     mode: document.getElementById("f-mode").value,
     rewrite_host: document.getElementById("f-rewrite-host").checked,
+    enabled: document.getElementById("f-enabled").checked,
   };
   try {
     const res = await fetch("/bridges", {

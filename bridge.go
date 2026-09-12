@@ -43,6 +43,78 @@ type runningBridge interface {
 	Shutdown(ctx context.Context)
 }
 
+// healthReporter is implemented by the two bridge types that actually
+// dial Target (tcpBridge, httpBridge) -- not by every runningBridge, so
+// the management socket's own httpBridge (built directly by
+// startManagementServer, which never dials anything) doesn't need to
+// fake one. manage.go type-asserts for this to fill in a bridgeInfo's
+// dial-health fields.
+type healthReporter interface {
+	dialHealth() healthSnapshot
+}
+
+// healthSnapshot is a point-in-time read of dialHealth, safe to use
+// without further locking.
+type healthSnapshot struct {
+	// ConsecutiveFailures counts dial attempts since the last success (0
+	// if the most recent dial succeeded, or none has happened yet).
+	ConsecutiveFailures int
+	// LastError is the most recent dial error, or "" if the most recent
+	// dial succeeded or none has happened yet.
+	LastError string
+	// LastAttempt is when the most recent dial happened, or the zero
+	// Time if none has.
+	LastAttempt time.Time
+}
+
+// dialHealth tracks the outcome of every dial a bridge makes to its
+// Target, purely for reporting via GET /bridges -- tsbridge never acts
+// on this itself (no automatic retries, no tearing the bridge down over
+// it); it's the operator's or their monitoring's call what a string of
+// dial failures should mean. It's also necessarily passive rather than
+// an active health check: tsbridge only learns about Target's
+// reachability when something actually tries to use the bridge, so a
+// bridge with no traffic shows no failures whether or not Target is
+// actually up.
+type dialHealth struct {
+	mu          sync.Mutex
+	consecutive int
+	lastErr     error
+	lastAttempt time.Time
+}
+
+// wrap returns a dialFunc that behaves exactly like dial, except every
+// call updates h first.
+func (h *dialHealth) wrap(dial dialFunc) dialFunc {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		conn, err := dial(ctx, network, address)
+		h.record(err)
+		return conn, err
+	}
+}
+
+func (h *dialHealth) record(err error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.lastAttempt = time.Now()
+	h.lastErr = err
+	if err != nil {
+		h.consecutive++
+	} else {
+		h.consecutive = 0
+	}
+}
+
+func (h *dialHealth) snapshot() healthSnapshot {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	s := healthSnapshot{ConsecutiveFailures: h.consecutive, LastAttempt: h.lastAttempt}
+	if h.lastErr != nil {
+		s.LastError = h.lastErr.Error()
+	}
+	return s
+}
+
 // startBridge creates the bridge's Unix socket (removing any stale one
 // first) with the given permissions, then starts serving it in the
 // background according to b.Mode until Shutdown is called on the
@@ -169,11 +241,14 @@ type tcpBridge struct {
 	l      net.Listener
 	cancel context.CancelFunc // cancels this bridge's own ctx; see Shutdown
 	wg     sync.WaitGroup     // acceptLoop + one handleConn goroutine per connection
+	health *dialHealth
 }
 
 func startTCPBridge(ctx context.Context, dial dialFunc, b BridgeConfig, l net.Listener, fatal chan<- error) *tcpBridge {
 	ctx, cancel := context.WithCancel(ctx)
-	t := &tcpBridge{l: l, cancel: cancel}
+	health := &dialHealth{}
+	dial = health.wrap(dial)
+	t := &tcpBridge{l: l, cancel: cancel, health: health}
 	t.wg.Add(1)
 	go func() {
 		defer t.wg.Done()
@@ -203,6 +278,8 @@ func (t *tcpBridge) Shutdown(ctx context.Context) {
 	case <-ctx.Done():
 	}
 }
+
+func (t *tcpBridge) dialHealth() healthSnapshot { return t.health.snapshot() }
 
 // acceptLoop accepts connections on l until it's closed. Each connection
 // is handled in its own goroutine so a slow or wedged peer, or an
@@ -301,10 +378,13 @@ type httpBridge struct {
 	srv    *http.Server
 	l      net.Listener
 	cancel context.CancelFunc // cancels this bridge's own ctx; see Shutdown
+	health *dialHealth        // never nil -- see startManagementServer, which also builds an httpBridge
 }
 
 func startHTTPBridge(ctx context.Context, dial dialFunc, b BridgeConfig, l net.Listener, fatal chan<- error) *httpBridge {
 	ctx, cancel := context.WithCancel(ctx)
+	health := &dialHealth{}
+	dial = health.wrap(dial)
 	targetURL := &url.URL{Scheme: "http", Host: b.Target}
 	proxy := httputil.NewSingleHostReverseProxy(targetURL)
 	// NewSingleHostReverseProxy's default Director rewrites r.URL.Host
@@ -353,7 +433,7 @@ func startHTTPBridge(ctx context.Context, dial dialFunc, b BridgeConfig, l net.L
 		}
 	}()
 
-	return &httpBridge{srv: httpSrv, l: l, cancel: cancel}
+	return &httpBridge{srv: httpSrv, l: l, cancel: cancel, health: health}
 }
 
 // Shutdown stops accepting new connections and waits, bounded by ctx,
@@ -384,3 +464,5 @@ func (h *httpBridge) Shutdown(ctx context.Context) {
 		h.srv.Close()
 	}
 }
+
+func (h *httpBridge) dialHealth() healthSnapshot { return h.health.snapshot() }

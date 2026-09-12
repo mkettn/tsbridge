@@ -33,7 +33,7 @@ http://localhost:1234 {
 # (which holds this node's tsnet identity keys) and the socket files all
 # live one level up, outside what file_server can ever reach here.
 http://localhost:1235 {
-	@api path /bridges /bridges/*
+	@api path /status /bridges /bridges/*
 	reverse_proxy @api unix/tsbridge-example-control.sock
 
 	root * www

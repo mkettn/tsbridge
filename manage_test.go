@@ -7,12 +7,22 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"tailscale.com/ipn/ipnstate"
 )
+
+// fakeStatus is a statusFunc for tests that don't care about GET
+// /status's actual content -- TestManagementHandler_Status below uses
+// its own to check that content specifically.
+func fakeStatus(ctx context.Context) (*ipnstate.Status, error) {
+	return &ipnstate.Status{BackendState: "Running"}, nil
+}
 
 // newTestManager returns a bridgeManager wired to failDial (bridge_test.go)
 // with its state file under a fresh temp directory, and a context canceled
@@ -23,7 +33,7 @@ func newTestManager(t *testing.T) (*bridgeManager, string) {
 	statePath := filepath.Join(dir, managedBridgesFileName)
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	return newBridgeManager(ctx, failDial, 0660, "", statePath, ""), dir
+	return newBridgeManager(ctx, failDial, 0660, "", statePath, "", fakeStatus), dir
 }
 
 // blockingBridge is a runningBridge whose Shutdown blocks until release is
@@ -164,7 +174,7 @@ func newTestManagerWithState(t *testing.T, statePath string) (*bridgeManager, st
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	return newBridgeManager(ctx, failDial, 0660, "", statePath, ""), filepath.Dir(statePath)
+	return newBridgeManager(ctx, failDial, 0660, "", statePath, "", fakeStatus), filepath.Dir(statePath)
 }
 
 // A managed-bridges.yaml entry that collides with a config.yaml one is
@@ -182,7 +192,7 @@ func TestBridgeManager_StartAllSkipsManagedBridgeCollidingWithConfig(t *testing.
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	m := newBridgeManager(ctx, failDial, 0660, "", statePath, "")
+	m := newBridgeManager(ctx, failDial, 0660, "", statePath, "", fakeStatus)
 
 	static := []BridgeConfig{{Name: "dup", Listen: filepath.Join(dir, "other.sock"), Target: "t:2", Mode: "tcp"}}
 	started, attempted, err := m.startAll(static)
@@ -205,7 +215,7 @@ func TestBridgeManager_StartAllStillFatalOnDuplicateWithinConfig(t *testing.T) {
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	m := newBridgeManager(ctx, failDial, 0660, "", filepath.Join(dir, managedBridgesFileName), "")
+	m := newBridgeManager(ctx, failDial, 0660, "", filepath.Join(dir, managedBridgesFileName), "", fakeStatus)
 
 	static := []BridgeConfig{
 		{Name: "dup", Listen: filepath.Join(dir, "a.sock"), Target: "t:1", Mode: "tcp"},
@@ -222,7 +232,7 @@ func TestBridgeManager_RemoveConfigSourcedBridgeLeavesStateFileUntouched(t *test
 	statePath := filepath.Join(dir, managedBridgesFileName)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	m := newBridgeManager(ctx, failDial, 0660, "", statePath, "")
+	m := newBridgeManager(ctx, failDial, 0660, "", statePath, "", fakeStatus)
 
 	static := []BridgeConfig{{Name: "static-a", Listen: filepath.Join(dir, "static.sock"), Target: "t:1", Mode: "tcp"}}
 	if _, _, err := m.startAll(static); err != nil {
@@ -520,7 +530,7 @@ func TestStartManagementServer_ServesOverUnixSocket(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	m := newBridgeManager(ctx, failDial, 0660, "", filepath.Join(dir, managedBridgesFileName), sockPath)
+	m := newBridgeManager(ctx, failDial, 0660, "", filepath.Join(dir, managedBridgesFileName), sockPath, fakeStatus)
 	rb, err := startManagementServer(sockPath, 0600, "", m)
 	if err != nil {
 		t.Fatalf("startManagementServer: %v", err)
@@ -652,7 +662,7 @@ func TestBridgeManager_AddRejectsManagementSocketPath(t *testing.T) {
 	mgmtSock := filepath.Join(dir, "control.sock")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	m := newBridgeManager(ctx, failDial, 0660, "", filepath.Join(dir, managedBridgesFileName), mgmtSock)
+	m := newBridgeManager(ctx, failDial, 0660, "", filepath.Join(dir, managedBridgesFileName), mgmtSock, fakeStatus)
 
 	_, err := m.Add(BridgeConfig{Name: "svc", Listen: mgmtSock, Target: "t:1"})
 	if err == nil || !strings.Contains(err.Error(), "management socket") {
@@ -671,7 +681,7 @@ func TestBridgeManager_StartAllSkipsManagedEntryCollidingWithManagementSocket(t 
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	m := newBridgeManager(ctx, failDial, 0660, "", statePath, mgmtSock)
+	m := newBridgeManager(ctx, failDial, 0660, "", statePath, mgmtSock, fakeStatus)
 
 	started, attempted, err := m.startAll(nil)
 	if err != nil {
@@ -715,7 +725,7 @@ func TestBridgeManager_StartAllNormalizesAndToleratesBadManagedEntries(t *testin
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	m := newBridgeManager(ctx, failDial, 0660, "", statePath, "")
+	m := newBridgeManager(ctx, failDial, 0660, "", statePath, "", fakeStatus)
 
 	started, attempted, err := m.startAll(nil)
 	if err != nil {
@@ -727,5 +737,264 @@ func TestBridgeManager_StartAllNormalizesAndToleratesBadManagedEntries(t *testin
 	list := m.List()
 	if len(list) != 1 || list[0].Name != "good" || list[0].Mode != "tcp" {
 		t.Fatalf("want good (with mode: defaulted to tcp) running, got: %+v", list)
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+// A bridge with enabled: false (in config.yaml or managed-bridges.yaml)
+// is registered -- visible via GET /bridges, occupying its listen path
+// -- but startAll never calls startBridge for it, so it has no socket
+// and isn't counted as "attempted".
+func TestBridgeManager_StartAllSkipsDisabledBridges(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := newBridgeManager(ctx, failDial, 0660, "", filepath.Join(dir, managedBridgesFileName), "", fakeStatus)
+
+	sockPath := filepath.Join(dir, "off.sock")
+	static := []BridgeConfig{{Name: "off", Listen: sockPath, Target: "t:1", Mode: "tcp", Enabled: boolPtr(false)}}
+	started, attempted, err := m.startAll(static)
+	if err != nil {
+		t.Fatalf("startAll: %v", err)
+	}
+	if started != 0 || attempted != 0 {
+		t.Fatalf("want a disabled bridge to be neither started nor attempted, got %d/%d", started, attempted)
+	}
+	if _, err := os.Stat(sockPath); !os.IsNotExist(err) {
+		t.Errorf("want no socket for a disabled bridge, stat err = %v", err)
+	}
+	info, err := m.Get("off")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if info.Enabled || info.Running || info.Error != "" {
+		t.Fatalf("want disabled/not-running/no-error, got: %+v", info)
+	}
+}
+
+func TestBridgeManager_DisableStopsAndPersists(t *testing.T) {
+	m, dir := newTestManager(t)
+	sockPath := filepath.Join(dir, "svc.sock")
+
+	if _, err := m.Add(BridgeConfig{Name: "svc", Listen: sockPath, Target: "t:1"}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	if err := m.Disable("svc"); err != nil {
+		t.Fatalf("Disable: %v", err)
+	}
+
+	got, err := m.Get("svc")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Enabled || got.Running || got.Error != "" {
+		t.Fatalf("want disabled/not-running/no-error, got: %+v", got)
+	}
+	if _, err := os.Stat(sockPath); !os.IsNotExist(err) {
+		t.Errorf("want socket removed after Disable, stat err = %v", err)
+	}
+
+	data, err := os.ReadFile(m.statePath)
+	if err != nil {
+		t.Fatalf("reading state file: %v", err)
+	}
+	if !strings.Contains(string(data), "enabled: false") {
+		t.Fatalf("want disabled state persisted, got:\n%s", data)
+	}
+
+	// Idempotent.
+	if err := m.Disable("svc"); err != nil {
+		t.Fatalf("second Disable: %v", err)
+	}
+}
+
+func TestBridgeManager_EnableRestartsDisabledBridge(t *testing.T) {
+	m, dir := newTestManager(t)
+	sockPath := filepath.Join(dir, "svc.sock")
+
+	if _, err := m.Add(BridgeConfig{Name: "svc", Listen: sockPath, Target: "t:1", Enabled: boolPtr(false)}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if _, err := os.Stat(sockPath); !os.IsNotExist(err) {
+		t.Fatalf("want no socket for a bridge added disabled, stat err = %v", err)
+	}
+	before, err := m.Get("svc")
+	if err != nil || before.Enabled || before.Running {
+		t.Fatalf("want disabled/not-running right after Add: %+v, %v", before, err)
+	}
+
+	if err := m.Enable("svc"); err != nil {
+		t.Fatalf("Enable: %v", err)
+	}
+	if _, err := os.Stat(sockPath); err != nil {
+		t.Fatalf("want socket created after Enable: %v", err)
+	}
+	after, err := m.Get("svc")
+	if err != nil || !after.Enabled || !after.Running {
+		t.Fatalf("want enabled/running after Enable: %+v, %v", after, err)
+	}
+
+	// Idempotent.
+	if err := m.Enable("svc"); err != nil {
+		t.Fatalf("second Enable: %v", err)
+	}
+}
+
+// Enable also serves as "retry": a bridge that's enabled but crashed
+// (Running false with an Error) should be attempted again, not treated
+// as a no-op just because Enabled was already true.
+func TestBridgeManager_EnableRetriesCrashedBridge(t *testing.T) {
+	m, dir := newTestManager(t)
+	sockPath := filepath.Join(dir, "svc.sock")
+	cfg := BridgeConfig{Name: "svc", Listen: sockPath, Target: "t:1", Mode: "tcp"}
+
+	fatalCh := make(chan error, 1)
+	rb, err := startBridge(m.ctx, m.dial, cfg, m.sockMode, m.group, fatalCh)
+	if err != nil {
+		t.Fatalf("startBridge: %v", err)
+	}
+	done := make(chan struct{})
+	entry := &managedEntry{cfg: cfg, rb: rb, source: "managed", fatalDone: done}
+	m.mu.Lock()
+	m.entries["svc"] = entry
+	m.mu.Unlock()
+	go m.watchFatal(entry, fatalCh, done)
+	fatalCh <- errors.New("simulated crash")
+	waitFor(t, func() bool { info, _ := m.Get("svc"); return !info.Running })
+
+	crashed, _ := m.Get("svc")
+	if !crashed.Enabled || crashed.Running || crashed.Error == "" {
+		t.Fatalf("want enabled/not-running/error after crash: %+v", crashed)
+	}
+
+	// The injected fatalCh send above bypassed acceptLoop's real fatal
+	// path, which always closes (and thus unlinks) its listener before
+	// ever signaling -- so unlike a genuine crash, sockPath is still
+	// actually bound here. Shut it down for real so Enable's retry can
+	// rebind the path, same as it could after a real crash.
+	shutCtx, cancelShut := context.WithTimeout(context.Background(), 5*time.Second)
+	rb.Shutdown(shutCtx)
+	cancelShut()
+
+	if err := m.Enable("svc"); err != nil {
+		t.Fatalf("Enable (retry): %v", err)
+	}
+	retried, err := m.Get("svc")
+	if err != nil || !retried.Running || retried.Error != "" {
+		t.Fatalf("want running again with no error after retry: %+v, %v", retried, err)
+	}
+}
+
+func TestBridgeManager_DisableConfigSourcedBridgeLeavesStateFileUntouched(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, managedBridgesFileName)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := newBridgeManager(ctx, failDial, 0660, "", statePath, "", fakeStatus)
+
+	static := []BridgeConfig{{Name: "static-a", Listen: filepath.Join(dir, "static.sock"), Target: "t:1", Mode: "tcp"}}
+	if _, _, err := m.startAll(static); err != nil {
+		t.Fatalf("startAll: %v", err)
+	}
+
+	if err := m.Disable("static-a"); err != nil {
+		t.Fatalf("Disable: %v", err)
+	}
+	if _, err := os.Stat(statePath); !os.IsNotExist(err) {
+		t.Errorf("want no state file written for a config-sourced bridge's Disable, stat err = %v", err)
+	}
+	info, err := m.Get("static-a")
+	if err != nil || info.Enabled || info.Running {
+		t.Fatalf("want static-a disabled/not-running: %+v, %v", info, err)
+	}
+}
+
+func TestManagementHandler_DisableEnable(t *testing.T) {
+	m, dir := newTestManager(t)
+	h := m.Handler()
+
+	body, _ := json.Marshal(BridgeConfig{Name: "svc", Listen: filepath.Join(dir, "svc.sock"), Target: "t:1"})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/bridges", bytes.NewReader(body)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST /bridges: want 201, got %d: %s", rec.Code, rec.Body)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/bridges/svc/disable", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("disable: want 200, got %d: %s", rec.Code, rec.Body)
+	}
+	var disabled bridgeInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &disabled); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	if disabled.Enabled || disabled.Running {
+		t.Fatalf("want disabled/not-running in response: %+v", disabled)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/bridges/missing/disable", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("disable missing: want 404, got %d", rec.Code)
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/bridges/svc/enable", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("enable: want 200, got %d: %s", rec.Code, rec.Body)
+	}
+	var enabled bridgeInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &enabled); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	if !enabled.Enabled || !enabled.Running {
+		t.Fatalf("want enabled/running in response: %+v", enabled)
+	}
+}
+
+func TestManagementHandler_Status(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	m := newBridgeManager(ctx, failDial, 0660, "", filepath.Join(dir, managedBridgesFileName), "", func(ctx context.Context) (*ipnstate.Status, error) {
+		return &ipnstate.Status{
+			BackendState:   "Running",
+			TailscaleIPs:   []netip.Addr{netip.MustParseAddr("100.64.0.1")},
+			CurrentTailnet: &ipnstate.TailnetStatus{Name: "example.ts.net"},
+			Health:         []string{"warning: something"},
+		}, nil
+	})
+
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/status", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /status: want 200, got %d: %s", rec.Code, rec.Body)
+	}
+	var got statusInfo
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding: %v", err)
+	}
+	if got.BackendState != "Running" || got.Tailnet != "example.ts.net" || len(got.TailscaleIPs) != 1 || got.TailscaleIPs[0] != "100.64.0.1" || len(got.Health) != 1 {
+		t.Fatalf("unexpected status: %+v", got)
+	}
+}
+
+func TestManagementHandler_StatusError(t *testing.T) {
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	m := newBridgeManager(ctx, failDial, 0660, "", filepath.Join(dir, managedBridgesFileName), "", func(ctx context.Context) (*ipnstate.Status, error) {
+		return nil, errors.New("simulated status failure")
+	})
+
+	rec := httptest.NewRecorder()
+	m.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/status", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("want 500 when the status fetch fails, got %d: %s", rec.Code, rec.Body)
 	}
 }

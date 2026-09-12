@@ -198,6 +198,9 @@ Each bridge entry:
   target: remote-machine:1234             # host:port reachable over the tailnet
   mode: tcp                 # optional, defaults to "tcp" -- see "HTTP mode" below for the other option
   rewrite_host: false       # mode: http only, optional, defaults to false -- see "HTTP mode" below
+  enabled: true             # optional, defaults to true -- false defines the bridge but
+                             # doesn't create its socket; see "Runtime bridge management"
+                             # below for enabling/disabling one without a restart
 ```
 
 `bridges:` is a flat list — every service `tsbridge` proxies is one entry
@@ -307,10 +310,13 @@ It speaks plain JSON over HTTP on that socket:
 
 | Method   | Path            | Does |
 |----------|-----------------|------|
-| `GET`    | `/bridges`      | List every currently running bridge |
+| `GET`    | `/status`       | The tailnet connection's own state |
+| `GET`    | `/bridges`      | List every bridge tsbridge knows about |
 | `GET`    | `/bridges/{name}` | One bridge's current info |
 | `POST`   | `/bridges`      | Add a bridge (body: same fields as a `bridges:` entry) |
-| `DELETE` | `/bridges/{name}` | Stop and remove a bridge |
+| `DELETE` | `/bridges/{name}` | Stop and forget a bridge |
+| `POST`   | `/bridges/{name}/disable` | Take a bridge offline, remembered as intentional |
+| `POST`   | `/bridges/{name}/enable`  | Bring a bridge back (or retry a failed one) |
 
 ```sh
 # Add a bridge.
@@ -322,8 +328,15 @@ curl --unix-socket /run/tsbridge/control.sock \
 # List every bridge tsbridge knows about.
 curl --unix-socket /run/tsbridge/control.sock http://unix/bridges
 
-# Remove it again.
+# Take it offline without forgetting it, then bring it back.
+curl --unix-socket /run/tsbridge/control.sock -X POST http://unix/bridges/svc/disable
+curl --unix-socket /run/tsbridge/control.sock -X POST http://unix/bridges/svc/enable
+
+# Remove it entirely.
 curl --unix-socket /run/tsbridge/control.sock -X DELETE http://unix/bridges/svc
+
+# Check the tailnet connection itself.
+curl --unix-socket /run/tsbridge/control.sock http://unix/status
 ```
 
 A bridge in a `GET` response looks like this:
@@ -336,27 +349,67 @@ A bridge in a `GET` response looks like this:
   "mode": "tcp",
   "rewrite_host": false,
   "source": "managed",
+  "enabled": true,
   "running": true,
-  "error": ""
+  "error": "",
+  "dial_failures": 0,
+  "last_dial_error": "",
+  "last_dial_at": null
 }
 ```
 
-`running: false` with a non-empty `error` means this bridge isn't
-currently serving anything — either it failed to start, or it started
-and later hit a fatal error (see [Failure isolation](#failure-isolation)
-below); the entry stays listed either way rather than disappearing.
+- **`enabled`** reflects operator intent, independent of `running`:
+  `false` means the bridge was deliberately taken offline (`disable`, or
+  `enabled: false` in its source file) and has no socket at all.
+- **`running: false` with `enabled: true`** means it's supposed to be up
+  but isn't — it failed to start, or hit a fatal error at runtime — and
+  `error` explains which (see
+  [Failure isolation](#failure-isolation) below). The entry stays listed
+  either way rather than disappearing; `enable` retries it.
+- **`dial_failures`/`last_dial_error`/`last_dial_at`** report `target`'s
+  reachability as observed by the bridge's own traffic: `dial_failures`
+  counts consecutive dial failures since the last success (0 if the most
+  recent dial succeeded, or none has happened yet). tsbridge never
+  probes `target` on its own and never acts on this itself — no
+  automatic disabling, no retries beyond what `mode: tcp`/`mode: http`
+  already do per-connection — it's purely for you or your monitoring to
+  read. That also means it's a passive signal: a bridge with no traffic
+  reports all-zero regardless of whether `target` is actually reachable.
 
-`POST` accepts the same fields as a `bridges:` entry (`name`, `listen`,
-`target`, `mode`, `rewrite_host`) with the same validation and defaults
-(`mode` defaults to `tcp`), with one difference: **`listen` must be an
-absolute path** — there's no config file directory to sensibly resolve a
-relative one against here. `name` and `listen` must still be unique
-across every bridge tsbridge knows about (config-defined, API-added, or
-not currently running) and can't equal `management_socket`'s own path —
-a conflict is a `409 Conflict` naming it, the same information a
-startup-time duplicate error gives you. A malformed or invalid request
-is `400 Bad Request`; removing a name that doesn't exist is
-`404 Not Found`.
+`POST /bridges` accepts the same fields as a `bridges:` entry (`name`,
+`listen`, `target`, `mode`, `rewrite_host`, `enabled`) with the same
+validation and defaults (`mode` defaults to `tcp`, `enabled` to `true` --
+setting it `false` registers the bridge without starting it), with one
+difference: **`listen` must be an absolute path** — there's no config
+file directory to sensibly resolve a relative one against here. `name`
+and `listen` must still be unique across every bridge tsbridge knows
+about (config-defined, API-added, or not currently running) and can't
+equal `management_socket`'s own path — a conflict is a `409 Conflict`
+naming it, the same information a startup-time duplicate error gives
+you. A malformed or invalid request is `400 Bad Request`; a request
+naming a bridge that doesn't exist is `404 Not Found`.
+
+`disable`/`enable` are idempotent (disabling an already-disabled bridge,
+or enabling an already-running one, is a no-op that still returns
+`200` with the bridge's current info) and, like everything else here,
+act on a bridge regardless of its `source` — see
+[Persistence](#persistence-managed-bridgesyaml) below for what
+persists and what doesn't.
+
+`GET /status` reports the tailnet connection itself, not any one bridge
+— useful for telling "every bridge is down because the tailnet
+connection dropped" apart from "this one bridge's target is down":
+
+```json
+{"backend_state": "Running", "tailscale_ips": ["100.x.y.z"], "tailnet": "example.ts.net", "health": []}
+```
+
+`backend_state` is one of tsnet's own state names (`NoState`,
+`NeedsLogin`, `NeedsMachineAuth`, `Stopped`, `Starting`, `Running`) —
+bridges can only reach their targets when this is `Running`. `health`
+lists active problems tailscaled itself has detected (an expired key,
+DNS misconfiguration, etc.); empty means none known, not necessarily
+that everything is fine.
 
 ### Persistence: `managed-bridges.yaml`
 
@@ -381,19 +434,24 @@ managed entry, or with `management_socket` itself, is skipped with a
 loud log line rather than failing startup — one bad line in that file
 shouldn't take every other bridge down with it.
 
-This gives each bridge an origin that decides what removing it does:
+This gives each bridge an origin that decides what removing (or
+disabling) it does:
 
 - **Added through the API** (`managed-bridges.yaml`): `DELETE` stops it
   and removes it from `managed-bridges.yaml`, so it stays gone across a
-  restart too.
-- **Defined in `config.yaml`**: `DELETE` stops it, but `config.yaml`
-  isn't touched — it comes back on the next restart unless you also
-  edit `config.yaml`. This lets you take a config-defined bridge down at
-  runtime (say, during an incident) without committing to removing it
-  permanently.
+  restart too. `disable` similarly updates its `enabled: false` into
+  `managed-bridges.yaml`, so it stays disabled (registered, but with no
+  socket) across a restart until `enable`d again.
+- **Defined in `config.yaml`**: `DELETE` and `disable` both stop it, but
+  `config.yaml` isn't touched — it comes back on the next restart unless
+  you also edit `config.yaml` (removing the entry, or adding its own
+  `enabled: false`). This lets you take a config-defined bridge down at
+  runtime (say, during an incident) without committing to removing or
+  disabling it permanently.
 
 `GET /bridges` includes a `source` field (`"config"` or `"managed"`) on
-every entry so you can tell which is which before removing one.
+every entry so you can tell which is which before removing or disabling
+one.
 
 ### Failure isolation
 
@@ -408,11 +466,13 @@ whole process (so `systemd`'s `Restart=on-failure` would fire); now that
 bridges can be managed independently at runtime, one bridge's failure
 shouldn't take unrelated ones down too.
 
-The bridge stays listed in `GET /bridges` (`"running": false`, with
-`"error"` explaining why) rather than disappearing, and a fatally-failed
-bridge is **not** removed from `managed-bridges.yaml` if it came from
-there — only an explicit `DELETE` does that — so a process restart gives
-it a fresh attempt rather than losing it for good.
+The bridge stays listed in `GET /bridges` (`"enabled": true,
+"running": false`, with `"error"` explaining why) rather than
+disappearing, and a fatally-failed bridge is **not** removed from
+`managed-bridges.yaml` if it came from there — only an explicit `DELETE`
+does that — so a process restart gives it a fresh attempt rather than
+losing it for good. With `management_socket` configured, `enable` gives
+it a fresh attempt sooner, without waiting for a restart.
 
 ## Install
 
