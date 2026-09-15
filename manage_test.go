@@ -938,6 +938,90 @@ func TestBridgeManager_EnableRetriesCrashedBridge(t *testing.T) {
 	}
 }
 
+// The bug this guards against: Enable sets Enabled: true in memory
+// before attempting to start the bridge, but used to return without
+// persisting on failure -- for a "managed" bridge, managed-bridges.yaml
+// would still say enabled: false while the live entry said true, so the
+// retry's intent silently didn't survive a restart (it would come back
+// disabled, not retried).
+func TestBridgeManager_EnableFailurePersistsIntentEvenOnFailure(t *testing.T) {
+	m, dir := newTestManager(t)
+	sockPath := filepath.Join(dir, "svc.sock")
+
+	if _, err := m.Add(BridgeConfig{Name: "svc", Listen: sockPath, Target: "t:1", Enabled: boolPtr(false)}); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	data, err := os.ReadFile(m.statePath)
+	if err != nil {
+		t.Fatalf("reading state file: %v", err)
+	}
+	if !strings.Contains(string(data), "enabled: false") {
+		t.Fatalf("want disabled persisted after Add, got:\n%s", data)
+	}
+
+	// Make sockPath unusable so Enable's startBridge fails deterministically.
+	if err := os.WriteFile(sockPath, []byte("not a socket"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.Enable("svc"); err == nil {
+		t.Fatal("want Enable to fail: sockPath is a regular file, not a socket")
+	}
+
+	info, err := m.Get("svc")
+	if err != nil || !info.Enabled || info.Running || info.Error == "" {
+		t.Fatalf("want enabled/not-running/error after the failed Enable: %+v, %v", info, err)
+	}
+
+	data, err = os.ReadFile(m.statePath)
+	if err != nil {
+		t.Fatalf("reading state file after failed Enable: %v", err)
+	}
+	if !strings.Contains(string(data), "enabled: true") {
+		t.Fatalf("want the failed Enable's intent (enabled: true) persisted despite the failure, got:\n%s", data)
+	}
+}
+
+// Add's conflict message for an existing, non-running bridge should
+// name the actual state and point at the right remedy: "enable it" for
+// one that's deliberately disabled (not "stopped (<nil>)", which is
+// what an unconditional %v on a nil lastError renders as), and "enable
+// it to retry" (not just remove) for one that crashed.
+func TestBridgeManager_AddConflictMessageDistinguishesDisabledFromCrashed(t *testing.T) {
+	m, dir := newTestManager(t)
+
+	if _, err := m.Add(BridgeConfig{Name: "off", Listen: filepath.Join(dir, "off.sock"), Target: "t:1", Enabled: boolPtr(false)}); err != nil {
+		t.Fatalf("Add off: %v", err)
+	}
+	_, err := m.Add(BridgeConfig{Name: "off", Listen: filepath.Join(dir, "other.sock"), Target: "t:2"})
+	if err == nil || !strings.Contains(err.Error(), "disabled") || !strings.Contains(err.Error(), "enable it") {
+		t.Fatalf("want a conflict message naming it disabled and pointing at enable, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "<nil>") {
+		t.Fatalf("want no <nil> noise for a disabled bridge's conflict, got: %v", err)
+	}
+
+	crashedCfg := BridgeConfig{Name: "crashed", Listen: filepath.Join(dir, "crashed.sock"), Target: "t:3", Mode: "tcp"}
+	fatalCh := make(chan error, 1)
+	rb, err := startBridge(m.ctx, m.dial, crashedCfg, m.sockMode, m.group, fatalCh)
+	if err != nil {
+		t.Fatalf("startBridge: %v", err)
+	}
+	done := make(chan struct{})
+	entry := &managedEntry{cfg: crashedCfg, rb: rb, source: "managed", fatalDone: done}
+	m.mu.Lock()
+	m.entries["crashed"] = entry
+	m.mu.Unlock()
+	go m.watchFatal(entry, fatalCh, done)
+	fatalCh <- errors.New("boom")
+	waitFor(t, func() bool { info, _ := m.Get("crashed"); return !info.Running })
+
+	_, err = m.Add(BridgeConfig{Name: "crashed", Listen: filepath.Join(dir, "other2.sock"), Target: "t:4"})
+	if err == nil || !strings.Contains(err.Error(), "enable it to retry") {
+		t.Fatalf("want a conflict message mentioning retry via enable, got: %v", err)
+	}
+}
+
 func TestBridgeManager_DisableConfigSourcedBridgeLeavesStateFileUntouched(t *testing.T) {
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, managedBridgesFileName)

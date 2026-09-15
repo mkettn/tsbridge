@@ -167,9 +167,16 @@ function stateCell(bridge) {
 }
 
 function renderRow(bridge) {
+  // enabled: true, running: false is the crashed-but-intended state --
+  // clicking the generic toggle there would call /disable (since
+  // bridge.enabled is already true), taking one extra round trip to
+  // reach the /enable retry the state actually calls for, and along the
+  // way persisting enabled: false for a managed bridge someone was
+  // trying to recover. Route that state straight to enableBridge instead.
+  const canRetry = bridge.enabled && !bridge.running;
   const toggleBtn = el("button", {
-    textContent: bridge.enabled ? "Disable" : "Enable",
-    onclick: () => toggleBridge(bridge),
+    textContent: bridge.enabled ? (canRetry ? "Retry" : "Disable") : "Enable",
+    onclick: () => (canRetry ? enableBridge(bridge.name) : toggleBridge(bridge)),
   });
   const removeBtn = el("button", {
     className: "remove",
@@ -241,15 +248,22 @@ async function removeBridge(name) {
   refresh();
 }
 
-async function toggleBridge(bridge) {
-  const action = bridge.enabled ? "disable" : "enable";
+async function postBridgeAction(name, action) {
   try {
-    const res = await fetch(`/bridges/${encodeURIComponent(bridge.name)}/${action}`, { method: "POST" });
-    if (!res.ok) throw new Error(`${action}ing ${bridge.name}: ${await messageFromResponse(res)}`);
+    const res = await fetch(`/bridges/${encodeURIComponent(name)}/${action}`, { method: "POST" });
+    if (!res.ok) throw new Error(`${action}ing ${name}: ${await messageFromResponse(res)}`);
   } catch (err) {
     showError(String(err.message || err));
   }
   refresh();
+}
+
+function toggleBridge(bridge) {
+  return postBridgeAction(bridge.name, bridge.enabled ? "disable" : "enable");
+}
+
+function enableBridge(name) {
+  return postBridgeAction(name, "enable");
 }
 
 form.addEventListener("submit", async (event) => {

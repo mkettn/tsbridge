@@ -343,7 +343,10 @@ func (m *bridgeManager) Add(cfg BridgeConfig) (bridgeInfo, error) {
 
 	if existing, exists := m.entries[cfg.Name]; exists {
 		if existing.rb == nil {
-			return bridgeInfo{}, conflictErr("bridge %q already exists, stopped (%v) -- remove it first to replace it", cfg.Name, existing.lastError)
+			if existing.cfg.Enabled != nil && !*existing.cfg.Enabled {
+				return bridgeInfo{}, conflictErr("bridge %q already exists but is disabled -- enable it, or remove it first to replace it", cfg.Name)
+			}
+			return bridgeInfo{}, conflictErr("bridge %q already exists, stopped (%v) -- enable it to retry, or remove it first to replace it", cfg.Name, existing.lastError)
 		}
 		return bridgeInfo{}, conflictErr("bridge %q already exists", cfg.Name)
 	}
@@ -498,8 +501,21 @@ func (m *bridgeManager) Enable(name string) error {
 	fatalCh := make(chan error, 1)
 	rb, err := startBridge(m.ctx, m.dial, entry.cfg, m.sockMode, m.group, fatalCh)
 	if err != nil {
+		// The intent (enabled: true) stands even though starting it
+		// failed -- same as startLocked already treats a failed-but-
+		// intended bridge -- so a managed one persists that intent too:
+		// leaving the state file at its old enabled: false here would
+		// have this retry silently not take effect, coming back
+		// disabled (not retried) on the next restart.
 		entry.lastError = err
+		var saveErr error
+		if entry.source == "managed" {
+			saveErr = m.saveLocked()
+		}
 		m.mu.Unlock()
+		if saveErr != nil {
+			log.Printf("management: bridge %q failed to start, and failed to update %s: %v", name, m.statePath, saveErr)
+		}
 		return badRequest("starting bridge %q: %v", name, err)
 	}
 	done := make(chan struct{})

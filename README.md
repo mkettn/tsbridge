@@ -339,7 +339,25 @@ curl --unix-socket /run/tsbridge/control.sock -X DELETE http://unix/bridges/svc
 curl --unix-socket /run/tsbridge/control.sock http://unix/status
 ```
 
-A bridge in a `GET` response looks like this:
+A healthy bridge in a `GET` response looks like this:
+
+```json
+{
+  "name": "svc",
+  "listen": "/run/tsbridge/svc.sock",
+  "target": "remote-machine:1234",
+  "mode": "tcp",
+  "rewrite_host": false,
+  "source": "managed",
+  "enabled": true,
+  "running": true
+}
+```
+
+`error`, `dial_failures`, `last_dial_error`, and `last_dial_at` are all
+omitted at their zero value (no error, no dial failures) rather than
+sent as `""`/`0`/`null` — so their *presence* is itself the signal
+something's worth looking at:
 
 ```json
 {
@@ -351,10 +369,9 @@ A bridge in a `GET` response looks like this:
   "source": "managed",
   "enabled": true,
   "running": true,
-  "error": "",
-  "dial_failures": 0,
-  "last_dial_error": "",
-  "last_dial_at": null
+  "dial_failures": 3,
+  "last_dial_error": "dial tcp 100.x.y.z:1234: connect: connection refused",
+  "last_dial_at": "2026-01-01T12:00:00Z"
 }
 ```
 
@@ -374,7 +391,7 @@ A bridge in a `GET` response looks like this:
   automatic disabling, no retries beyond what `mode: tcp`/`mode: http`
   already do per-connection — it's purely for you or your monitoring to
   read. That also means it's a passive signal: a bridge with no traffic
-  reports all-zero regardless of whether `target` is actually reachable.
+  omits all three regardless of whether `target` is actually reachable.
 
 `POST /bridges` accepts the same fields as a `bridges:` entry (`name`,
 `listen`, `target`, `mode`, `rewrite_host`, `enabled`) with the same
