@@ -1,0 +1,63 @@
+# Builds tsbridge and attaches the binaries to a GitHub Release once
+# it's published -- not on every push or tag, so cutting a release is a
+# deliberate step (draft it, write the notes, then publish) rather than
+# something that fires from git alone.
+#
+# Release platforms are linux/amd64 and linux/arm64 only, matching what
+# the rest of this repo actually supports installing on (tsbridge.service,
+# tsbridge-sysusers.conf, the socket_group/socket_mode model) -- tsnet
+# itself and the Go build are portable to more, but nothing else here is.
+#
+# Uses only GitHub's own actions/checkout and actions/setup-go, plus the
+# gh CLI (preinstalled on GitHub-hosted runners) to upload assets -- no
+# third-party Actions, matching this project's own preference for a
+# small dependency footprint (see go.mod/go.sum).
+name: Release build
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write # to upload binaries onto the release that triggered this
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Same checks README.md's "Building" section says this repo is
+      # kept clean against -- a fatal gate here rather than something
+      # to notice after a binary's already attached to the release.
+      - name: Vet and test
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          name="tsbridge-${{ github.event.release.tag_name }}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          go build -trimpath -ldflags="-s -w -X main.version=${{ github.event.release.tag_name }}" -o "$name" .
+          sha256sum "$name" > "$name.sha256"
+          echo "ASSET=$name" >> "$GITHUB_ENV"
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.event.release.tag_name }}" "$ASSET" "$ASSET.sha256" --repo "${{ github.repository }}"
