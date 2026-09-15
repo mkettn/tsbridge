@@ -89,11 +89,19 @@ func run() error {
 	}
 	log.Printf("joined tailnet as %q via %s (ephemeral=%v, state_dir=%q)", cfg.Hostname, controlServer, cfg.Ephemeral, cfg.StateDir)
 
+	// srv.Up already succeeded above, so this always succeeds too (it
+	// only errors if the server hasn't been started yet); lc.StatusWithoutPeers
+	// is GET /status's data source, passed in the same way srv.Dial is.
+	lc, err := srv.LocalClient()
+	if err != nil {
+		return fmt.Errorf("getting local client: %w", err)
+	}
+
 	statePath := ""
 	if cfg.StateDir != "" {
 		statePath = filepath.Join(cfg.StateDir, managedBridgesFileName)
 	}
-	manager := newBridgeManager(ctx, srv.Dial, cfg.SocketMode, cfg.SocketGroup, statePath, cfg.ManagementSocket)
+	manager := newBridgeManager(ctx, srv.Dial, cfg.SocketMode, cfg.SocketGroup, statePath, cfg.ManagementSocket, lc.StatusWithoutPeers)
 	started, attempted, err := manager.startAll(cfg.Bridges)
 	if err != nil {
 		return err

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -510,4 +511,111 @@ func TestStartHTTPBridge_RuntimeShutdownDoesNotReportFatal(t *testing.T) {
 		t.Fatalf("a runtime Shutdown (process ctx still alive) should not report a fatal error, got: %v", err)
 	default:
 	}
+}
+
+// flakyDial fails every dial while broken is true, and otherwise dials
+// backendAddr for real -- lets a test flip Target's reachability under a
+// running bridge to exercise dialHealth's tracking of both directions.
+type flakyDial struct {
+	backendAddr string
+	broken      atomic.Bool
+}
+
+func (f *flakyDial) dial(ctx context.Context, network, address string) (net.Conn, error) {
+	if f.broken.Load() {
+		return nil, fmt.Errorf("simulated dial failure")
+	}
+	var d net.Dialer
+	return d.DialContext(ctx, "tcp", f.backendAddr)
+}
+
+func TestStartBridge_DialHealthTracksFailureAndRecovery(t *testing.T) {
+	for _, mode := range []string{"tcp", "http"} {
+		t.Run(mode, func(t *testing.T) {
+			backend, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer backend.Close()
+			go func() {
+				for {
+					c, err := backend.Accept()
+					if err != nil {
+						return
+					}
+					c.Close()
+				}
+			}()
+
+			dir := t.TempDir()
+			sockPath := filepath.Join(dir, "health-"+mode+".sock")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			flaky := &flakyDial{backendAddr: backend.Addr().String()}
+			flaky.broken.Store(true)
+
+			b := BridgeConfig{Name: "health", Listen: sockPath, Target: "example.invalid:1", Mode: mode}
+			fatal := make(chan error, 1)
+			rb, err := startBridge(ctx, flaky.dial, b, 0660, "", fatal)
+			if err != nil {
+				t.Fatalf("startBridge: %v", err)
+			}
+			defer shutdown(t, cancel, rb)
+
+			hr, ok := rb.(healthReporter)
+			if !ok {
+				t.Fatal("bridge doesn't implement healthReporter")
+			}
+
+			if h := hr.dialHealth(); h.ConsecutiveFailures != 0 || !h.LastAttempt.IsZero() {
+				t.Fatalf("want zero-value health before any traffic, got: %+v", h)
+			}
+
+			triggerDial(t, mode, sockPath)
+			waitForHealth(t, hr, func(h healthSnapshot) bool { return h.ConsecutiveFailures > 0 })
+			if h := hr.dialHealth(); h.LastError == "" || h.LastAttempt.IsZero() {
+				t.Fatalf("want a recorded failure, got: %+v", h)
+			}
+
+			flaky.broken.Store(false)
+			triggerDial(t, mode, sockPath)
+			waitForHealth(t, hr, func(h healthSnapshot) bool { return h.ConsecutiveFailures == 0 })
+			if h := hr.dialHealth(); h.LastError != "" {
+				t.Fatalf("want LastError cleared after a successful dial, got: %+v", h)
+			}
+		})
+	}
+}
+
+// triggerDial makes one request/connection through sockPath, enough to
+// make the bridge attempt exactly one dial to Target. Errors connecting
+// are ignored -- for mode: tcp specifically, a failed dial closes the
+// local connection immediately, which a plain net.Dial sees as a normal
+// EOF/reset, not a Go error worth failing the test over.
+func triggerDial(t *testing.T, mode, sockPath string) {
+	t.Helper()
+	if mode == "http" {
+		unixHTTPClient(sockPath).Get("http://unix/")
+		return
+	}
+	c, err := net.Dial("unix", sockPath)
+	if err != nil {
+		t.Fatalf("dial socket: %v", err)
+	}
+	defer c.Close()
+	c.SetDeadline(time.Now().Add(2 * time.Second))
+	io.Copy(io.Discard, c)
+}
+
+func waitForHealth(t *testing.T, hr healthReporter, cond func(healthSnapshot) bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond(hr.dialHealth()) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("condition not met within 2s, last health: %+v", hr.dialHealth())
 }

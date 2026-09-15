@@ -54,6 +54,15 @@ type BridgeConfig struct {
 	// to Target's own host:port instead -- needed for a target that
 	// routes or validates by hostname (tailscale serve, notably).
 	RewriteHost bool `yaml:"rewrite_host" json:"rewrite_host"`
+	// Enabled is a *bool (rather than bool) so "omitted" (nil, defaults
+	// to true) is distinguishable from "explicitly false" -- a bridge
+	// entry with enabled: false is known (visible via GET /bridges,
+	// still occupying its name/listen path) but doesn't run: no socket
+	// is created for it. This is normalizeBridge's job to resolve to a
+	// concrete, always-non-nil pointer before the value is used or
+	// re-persisted; see bridgeManager's Disable/Enable in manage.go for
+	// how a bridge moves between the two states at runtime.
+	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 }
 
 // Config is the fully resolved, validated configuration used at runtime.
@@ -96,10 +105,7 @@ func LoadConfig(path string) (*Config, error) {
 	bridges := raw.Bridges
 	for i := range bridges {
 		bridges[i].Listen = resolvePath(baseDir, bridges[i].Listen)
-		bridges[i].Mode = strings.ToLower(strings.TrimSpace(bridges[i].Mode))
-		if bridges[i].Mode == "" {
-			bridges[i].Mode = defaultBridgeMode
-		}
+		normalizeBridge(&bridges[i])
 	}
 
 	if err := checkBridges(bridges); err != nil {
@@ -247,14 +253,20 @@ func checkBridges(bridges []BridgeConfig) error {
 	return nil
 }
 
-// normalizeBridgeMode lowercases/trims Mode and fills in the default when
-// empty, matching what LoadConfig does for bridges loaded from
-// config.yaml. Used by bridgeManager.Add so a bridge submitted through the
-// management API is normalized the same way.
-func normalizeBridgeMode(b *BridgeConfig) {
+// normalizeBridge lowercases/trims Mode (filling in the default when
+// empty) and resolves Enabled to a concrete, always-non-nil pointer
+// (defaulting to true when omitted). Applied uniformly to a bridge
+// however it was sourced -- config.yaml, managed-bridges.yaml, or a
+// management API request -- so all three accept the same shorthand
+// (mode:/enabled: omitted) and end up with the same normalized shape.
+func normalizeBridge(b *BridgeConfig) {
 	b.Mode = strings.ToLower(strings.TrimSpace(b.Mode))
 	if b.Mode == "" {
 		b.Mode = defaultBridgeMode
+	}
+	if b.Enabled == nil {
+		enabled := true
+		b.Enabled = &enabled
 	}
 }
 

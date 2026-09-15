@@ -83,3 +83,11 @@ bridges:
     # `tailscale serve`-published target is the common case -- so it
     # gets target's own host:port as its Host header instead.
     # rewrite_host: true
+  - name: my-disabled-service
+    listen: /run/tsbridge/my-disabled-service.sock
+    target: third-machine:9090
+    # Optional, defaults to true. false defines the bridge (it shows up
+    # in management_socket's GET /bridges, occupying this listen path)
+    # but doesn't create its socket -- see README's "Runtime bridge
+    # management" section for enabling it later without a restart.
+    enabled: false
