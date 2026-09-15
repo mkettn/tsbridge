@@ -41,11 +41,23 @@ func main() {
 // defaultConfigPath is used when neither -c nor -config is given.
 const defaultConfigPath = "/etc/tsbridge/config.yaml"
 
+// version is overwritten at build time for a release binary, via
+// -ldflags "-X main.version=..." (see .github/workflows/release.yml). A
+// plain `go build .` leaves it at "dev".
+var version = "dev"
+
 func run() error {
 	var configPath string
+	var showVersion bool
 	flag.StringVar(&configPath, "c", defaultConfigPath, "path to the YAML config file (shorthand for -config)")
 	flag.StringVar(&configPath, "config", defaultConfigPath, "path to the YAML config file")
+	flag.BoolVar(&showVersion, "version", false, "print the version and exit")
 	flag.Parse()
+
+	if showVersion {
+		fmt.Println("tsbridge " + version)
+		return nil
+	}
 
 	cfg, err := LoadConfig(configPath)
 	if err != nil {
