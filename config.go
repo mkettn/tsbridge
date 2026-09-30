@@ -235,8 +235,13 @@ func validateBridgeFields(b BridgeConfig) error {
 		return fmt.Errorf("bridge %q sets rewrite_host, but that only applies to mode: http (bridge is mode: %s)", b.Name, b.Mode)
 	}
 	if b.SocketMode != "" {
-		if _, err := parseSocketMode(b.SocketMode); err != nil {
+		m, err := parseSocketMode(b.SocketMode)
+		if err != nil {
 			return fmt.Errorf("bridge %q socket_mode: %w", b.Name, err)
+		}
+		if b.SocketGroup != "" && m&0o060 == 0 {
+			return fmt.Errorf("bridge %q sets socket_group %q but socket_mode %q gives the group no access -- set a mode that does, e.g. \"0660\"",
+				b.Name, b.SocketGroup, b.SocketMode)
 		}
 	}
 	return nil

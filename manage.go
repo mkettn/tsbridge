@@ -79,10 +79,11 @@ type bridgeInfo struct {
 	Target      string `json:"target"`
 	Mode        string `json:"mode"`
 	RewriteHost bool   `json:"rewrite_host"`
-	// SocketGroup/SocketMode are the bridge's own overrides; empty means
-	// it inherits the global socket_group/socket_mode.
-	SocketGroup string `json:"socket_group,omitempty"`
-	SocketMode  string `json:"socket_mode,omitempty"`
+	// SocketGroup/SocketMode are the effective values: the bridge's own
+	// override if set, else the global socket_group/socket_mode.
+	// SocketGroup is empty when no group is applied.
+	SocketGroup string `json:"socket_group"`
+	SocketMode  string `json:"socket_mode"`
 	// Source is "config" (loaded from config.yaml's bridges: list at
 	// startup) or "managed" (added through this API, or loaded from
 	// managed-bridges.yaml at startup).
@@ -386,7 +387,7 @@ func (m *bridgeManager) Add(cfg BridgeConfig) (bridgeInfo, error) {
 		log.Printf("management: bridge %q started but failed to persist to %s: %v", cfg.Name, m.statePath, err)
 	}
 
-	return toBridgeInfo(entry), nil
+	return m.toBridgeInfo(entry), nil
 }
 
 // Remove stops name (if it's currently running -- a non-running entry,
@@ -548,7 +549,7 @@ func (m *bridgeManager) Get(name string) (bridgeInfo, error) {
 	if !ok {
 		return bridgeInfo{}, notFoundErr("bridge %q not found", name)
 	}
-	return toBridgeInfo(entry), nil
+	return m.toBridgeInfo(entry), nil
 }
 
 // List returns every currently running bridge, sorted by name.
@@ -557,21 +558,30 @@ func (m *bridgeManager) List() []bridgeInfo {
 	defer m.mu.Unlock()
 	out := make([]bridgeInfo, 0, len(m.entries))
 	for _, entry := range m.entries {
-		out = append(out, toBridgeInfo(entry))
+		out = append(out, m.toBridgeInfo(entry))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out
 }
 
-func toBridgeInfo(e *managedEntry) bridgeInfo {
+func (m *bridgeManager) toBridgeInfo(e *managedEntry) bridgeInfo {
+	group, mode := m.group, m.sockMode
+	if e.cfg.SocketGroup != "" {
+		group = e.cfg.SocketGroup
+	}
+	if e.cfg.SocketMode != "" {
+		if pm, err := parseSocketMode(e.cfg.SocketMode); err == nil {
+			mode = pm
+		}
+	}
 	info := bridgeInfo{
 		Name:        e.cfg.Name,
 		Listen:      e.cfg.Listen,
 		Target:      e.cfg.Target,
 		Mode:        e.cfg.Mode,
 		RewriteHost: e.cfg.RewriteHost,
-		SocketGroup: e.cfg.SocketGroup,
-		SocketMode:  e.cfg.SocketMode,
+		SocketGroup: group,
+		SocketMode:  fmt.Sprintf("%04o", mode.Perm()),
 		Source:      e.source,
 		Enabled:     e.cfg.Enabled == nil || *e.cfg.Enabled,
 		Running:     e.rb != nil,
