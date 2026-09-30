@@ -198,6 +198,8 @@ Each bridge entry:
   target: remote-machine:1234             # host:port reachable over the tailnet
   mode: tcp                 # optional, defaults to "tcp" -- see "HTTP mode" below for the other option
   rewrite_host: false       # mode: http only, optional, defaults to false -- see "HTTP mode" below
+  socket_group: www-data    # optional, overrides the top-level socket_group for this socket only
+  socket_mode: "0660"       # optional, overrides the top-level socket_mode for this socket only
   enabled: true             # optional, defaults to true -- false defines the bridge but
                              # doesn't create its socket; see "Runtime bridge management"
                              # below for enabling/disabling one without a restart

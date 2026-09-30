@@ -79,6 +79,10 @@ type bridgeInfo struct {
 	Target      string `json:"target"`
 	Mode        string `json:"mode"`
 	RewriteHost bool   `json:"rewrite_host"`
+	// SocketGroup/SocketMode are the bridge's own overrides; empty means
+	// it inherits the global socket_group/socket_mode.
+	SocketGroup string `json:"socket_group,omitempty"`
+	SocketMode  string `json:"socket_mode,omitempty"`
 	// Source is "config" (loaded from config.yaml's bridges: list at
 	// startup) or "managed" (added through this API, or loaded from
 	// managed-bridges.yaml at startup).
@@ -566,6 +570,8 @@ func toBridgeInfo(e *managedEntry) bridgeInfo {
 		Target:      e.cfg.Target,
 		Mode:        e.cfg.Mode,
 		RewriteHost: e.cfg.RewriteHost,
+		SocketGroup: e.cfg.SocketGroup,
+		SocketMode:  e.cfg.SocketMode,
 		Source:      e.source,
 		Enabled:     e.cfg.Enabled == nil || *e.cfg.Enabled,
 		Running:     e.rb != nil,

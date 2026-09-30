@@ -63,6 +63,11 @@ type BridgeConfig struct {
 	// re-persisted; see bridgeManager's Disable/Enable in manage.go for
 	// how a bridge moves between the two states at runtime.
 	Enabled *bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+	// SocketGroup and SocketMode override the top-level socket_group /
+	// socket_mode for this bridge's socket only. Empty means "inherit the
+	// global value"; each is independent of the other.
+	SocketGroup string `yaml:"socket_group,omitempty" json:"socket_group,omitempty"`
+	SocketMode  string `yaml:"socket_mode,omitempty" json:"socket_mode,omitempty"`
 }
 
 // Config is the fully resolved, validated configuration used at runtime.
@@ -228,6 +233,11 @@ func validateBridgeFields(b BridgeConfig) error {
 	}
 	if b.RewriteHost && b.Mode != "http" {
 		return fmt.Errorf("bridge %q sets rewrite_host, but that only applies to mode: http (bridge is mode: %s)", b.Name, b.Mode)
+	}
+	if b.SocketMode != "" {
+		if _, err := parseSocketMode(b.SocketMode); err != nil {
+			return fmt.Errorf("bridge %q socket_mode: %w", b.Name, err)
+		}
 	}
 	return nil
 }

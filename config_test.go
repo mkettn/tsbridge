@@ -467,3 +467,44 @@ bridges:
 		t.Errorf("want enabled: false preserved, got %+v", cfg.Bridges[0].Enabled)
 	}
 }
+
+func TestLoadConfig_PerBridgeSocketOverrides(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), `
+socket_group: web
+socket_mode: "0660"
+bridges:
+  - name: a
+    listen: /run/a.sock
+    target: h:1
+    socket_group: admins
+    socket_mode: "0600"
+  - name: b
+    listen: /run/b.sock
+    target: h:2
+`)
+	cfg, err := LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if a := cfg.Bridges[0]; a.SocketGroup != "admins" || a.SocketMode != "0600" {
+		t.Errorf("bridge a overrides = %q/%q", a.SocketGroup, a.SocketMode)
+	}
+	if b := cfg.Bridges[1]; b.SocketGroup != "" || b.SocketMode != "" {
+		t.Errorf("bridge b should inherit, got %q/%q", b.SocketGroup, b.SocketMode)
+	}
+}
+
+func TestLoadConfig_PerBridgeSocketModeInvalid(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), `
+bridges:
+  - name: a
+    listen: /run/a.sock
+    target: h:1
+    socket_mode: "rw"
+`)
+	if _, err := LoadConfig(filepath.Join(dir, "config.yaml")); err == nil {
+		t.Fatal("want error for invalid per-bridge socket_mode")
+	}
+}

@@ -124,6 +124,17 @@ func (h *dialHealth) snapshot() healthSnapshot {
 // (non-blocking) so the caller can shut the whole process down rather
 // than leaving a dead bridge silently bound but unserved.
 func startBridge(ctx context.Context, dial dialFunc, b BridgeConfig, sockMode os.FileMode, group string, fatal chan<- error) (runningBridge, error) {
+	// Per-bridge overrides win over the global defaults passed in.
+	// validateBridgeFields already checked b.SocketMode parses.
+	if b.SocketMode != "" {
+		if m, err := parseSocketMode(b.SocketMode); err == nil {
+			sockMode = m
+		}
+	}
+	if b.SocketGroup != "" {
+		group = b.SocketGroup
+	}
+
 	l, err := createUnixSocket(b.Listen, sockMode, group)
 	if err != nil {
 		return nil, err
