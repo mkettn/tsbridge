@@ -239,8 +239,9 @@ func validateBridgeFields(b BridgeConfig) error {
 		if err != nil {
 			return fmt.Errorf("bridge %q socket_mode: %w", b.Name, err)
 		}
-		if b.SocketGroup != "" && m&0o060 == 0 {
-			return fmt.Errorf("bridge %q sets socket_group %q but socket_mode %q gives the group no access -- set a mode that does, e.g. \"0660\"",
+		if b.SocketGroup != "" && m&0o020 == 0 {
+			return fmt.Errorf("bridge %q sets socket_group %q but socket_mode %q doesn't grant the group write access "+
+				"(connecting to a Unix socket requires it) -- use e.g. \"0660\"",
 				b.Name, b.SocketGroup, b.SocketMode)
 		}
 	}

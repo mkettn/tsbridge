@@ -565,14 +565,13 @@ func (m *bridgeManager) List() []bridgeInfo {
 }
 
 func (m *bridgeManager) toBridgeInfo(e *managedEntry) bridgeInfo {
-	group, mode := m.group, m.sockMode
-	if e.cfg.SocketGroup != "" {
-		group = e.cfg.SocketGroup
-	}
-	if e.cfg.SocketMode != "" {
-		if pm, err := parseSocketMode(e.cfg.SocketMode); err == nil {
-			mode = pm
-		}
+	// resolveSocketPerms can only fail on an unparseable socket_mode, which
+	// validateBridgeFields already rejected, so a failed bridge never gets
+	// here; report the configured value rather than substituting the global.
+	mode, group, err := resolveSocketPerms(e.cfg, m.sockMode, m.group)
+	modeStr := fmt.Sprintf("%04o", mode.Perm())
+	if err != nil {
+		modeStr = e.cfg.SocketMode
 	}
 	info := bridgeInfo{
 		Name:        e.cfg.Name,
@@ -581,7 +580,7 @@ func (m *bridgeManager) toBridgeInfo(e *managedEntry) bridgeInfo {
 		Mode:        e.cfg.Mode,
 		RewriteHost: e.cfg.RewriteHost,
 		SocketGroup: group,
-		SocketMode:  fmt.Sprintf("%04o", mode.Perm()),
+		SocketMode:  modeStr,
 		Source:      e.source,
 		Enabled:     e.cfg.Enabled == nil || *e.cfg.Enabled,
 		Running:     e.rb != nil,
