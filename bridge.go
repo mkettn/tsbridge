@@ -124,6 +124,11 @@ func (h *dialHealth) snapshot() healthSnapshot {
 // (non-blocking) so the caller can shut the whole process down rather
 // than leaving a dead bridge silently bound but unserved.
 func startBridge(ctx context.Context, dial dialFunc, b BridgeConfig, sockMode os.FileMode, group string, fatal chan<- error) (runningBridge, error) {
+	sockMode, group, err := resolveSocketPerms(b, sockMode, group)
+	if err != nil {
+		return nil, err
+	}
+
 	l, err := createUnixSocket(b.Listen, sockMode, group)
 	if err != nil {
 		return nil, err
@@ -135,6 +140,24 @@ func startBridge(ctx context.Context, dial dialFunc, b BridgeConfig, sockMode os
 	default: // "tcp", the only other value checkBridges allows
 		return startTCPBridge(ctx, dial, b, l, fatal), nil
 	}
+}
+
+// resolveSocketPerms applies b's per-bridge socket_mode/socket_group
+// overrides on top of the global defaults. It's the one place that decides
+// what an override means, shared by startBridge (what's applied) and the
+// management API (what's reported), so the two can't drift apart.
+func resolveSocketPerms(b BridgeConfig, mode os.FileMode, group string) (os.FileMode, string, error) {
+	if b.SocketMode != "" {
+		m, err := parseSocketMode(b.SocketMode)
+		if err != nil {
+			return 0, "", fmt.Errorf("bridge %s: socket_mode: %w", b.Name, err)
+		}
+		mode = m
+	}
+	if b.SocketGroup != "" {
+		group = b.SocketGroup
+	}
+	return mode, group, nil
 }
 
 // createUnixSocket creates a Unix socket at path (removing any stale one

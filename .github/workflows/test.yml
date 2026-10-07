@@ -1,0 +1,30 @@
+# Runs go vet and the test suite on a pull request once it's ready for
+# review -- not while it's still a draft. ready_for_review fires when a
+# draft is marked ready; opened/synchronize/reopened keep a non-draft PR
+# covered on later pushes, and the job's draft guard skips them for drafts.
+#
+# Uses only GitHub's own actions/checkout and actions/setup-go, matching
+# release.yml.
+name: Test
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - run: go vet ./...
+
+      - run: go test -race ./...

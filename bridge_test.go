@@ -619,3 +619,33 @@ func waitForHealth(t *testing.T, hr healthReporter, cond func(healthSnapshot) bo
 	}
 	t.Fatalf("condition not met within 2s, last health: %+v", hr.dialHealth())
 }
+
+func TestStartBridge_PerBridgeSocketModeOverridesGlobal(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		override string
+		want     os.FileMode
+	}{
+		{"override wins", "0600", 0600},
+		{"inherits global", "", 0660},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sockPath := filepath.Join(t.TempDir(), "test.sock")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			b := BridgeConfig{Name: "svc", Listen: sockPath, Target: "example.invalid:1", Mode: "tcp", SocketMode: tc.override}
+			rb, err := startBridge(ctx, failDial, b, 0660, "", make(chan error, 1))
+			if err != nil {
+				t.Fatalf("startBridge: %v", err)
+			}
+			defer shutdown(t, cancel, rb)
+			fi, err := os.Stat(sockPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fi.Mode().Perm() != tc.want {
+				t.Errorf("want mode %v, got %v", tc.want, fi.Mode().Perm())
+			}
+		})
+	}
+}

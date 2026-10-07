@@ -467,3 +467,65 @@ bridges:
 		t.Errorf("want enabled: false preserved, got %+v", cfg.Bridges[0].Enabled)
 	}
 }
+
+func TestLoadConfig_PerBridgeSocketOverrides(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), `
+socket_group: web
+socket_mode: "0660"
+bridges:
+  - name: a
+    listen: /run/a.sock
+    target: h:1
+    socket_group: admins
+    socket_mode: "0660"
+  - name: b
+    listen: /run/b.sock
+    target: h:2
+`)
+	cfg, err := LoadConfig(filepath.Join(dir, "config.yaml"))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if a := cfg.Bridges[0]; a.SocketGroup != "admins" || a.SocketMode != "0660" {
+		t.Errorf("bridge a overrides = %q/%q", a.SocketGroup, a.SocketMode)
+	}
+	if b := cfg.Bridges[1]; b.SocketGroup != "" || b.SocketMode != "" {
+		t.Errorf("bridge b should inherit, got %q/%q", b.SocketGroup, b.SocketMode)
+	}
+}
+
+func TestLoadConfig_PerBridgeSocketModeInvalid(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "config.yaml"), `
+bridges:
+  - name: a
+    listen: /run/a.sock
+    target: h:1
+    socket_mode: "rw"
+`)
+	if _, err := LoadConfig(filepath.Join(dir, "config.yaml")); err == nil {
+		t.Fatal("want error for invalid per-bridge socket_mode")
+	}
+}
+
+func TestLoadConfig_PerBridgeGroupWithoutGroupWriteRejected(t *testing.T) {
+	// Connecting to a Unix socket needs group write, so group-read-only
+	// (0640) is as useless as owner-only (0600).
+	for _, mode := range []string{"0600", "0640"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := t.TempDir()
+			writeFile(t, filepath.Join(dir, "config.yaml"), `
+bridges:
+  - name: a
+    listen: /run/a.sock
+    target: h:1
+    socket_group: www-data
+    socket_mode: "`+mode+`"
+`)
+			if _, err := LoadConfig(filepath.Join(dir, "config.yaml")); err == nil {
+				t.Fatalf("want error for socket_group with mode %s, which gives the group no write access", mode)
+			}
+		})
+	}
+}
