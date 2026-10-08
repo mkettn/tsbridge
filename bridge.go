@@ -129,16 +129,49 @@ func startBridge(ctx context.Context, dial dialFunc, b BridgeConfig, sockMode os
 		return nil, err
 	}
 
+	network, addr := parseListen(b.Listen)
+	switch network {
+	case "udp":
+		return startUDPBridge(ctx, dial, b, addr, fatal)
+	case "tcp":
+		l, err := net.Listen("tcp", addr)
+		if err != nil {
+			return nil, fmt.Errorf("listening on tcp %s: %w", addr, err)
+		}
+		warnIfNonLoopback(b.Name, l.Addr())
+		return startListener(ctx, dial, b, l, fatal), nil
+	}
+
 	l, err := createUnixSocket(b.Listen, sockMode, group)
 	if err != nil {
 		return nil, err
 	}
+	return startListener(ctx, dial, b, l, fatal), nil
+}
 
+// warnIfNonLoopback logs when a network listener is reachable beyond this
+// host: unlike a Unix socket there are no file permissions, so anyone who
+// can reach the address gets a path onto the tailnet.
+func warnIfNonLoopback(name string, a net.Addr) {
+	var ip net.IP
+	switch v := a.(type) {
+	case *net.TCPAddr:
+		ip = v.IP
+	case *net.UDPAddr:
+		ip = v.IP
+	}
+	if !ip.IsLoopback() {
+		log.Printf("bridge %s: WARNING: listening on non-loopback %s with no access control -- anyone who can reach it can use this bridge", name, a)
+	}
+}
+
+// startListener serves an already-bound stream listener according to b.Mode.
+func startListener(ctx context.Context, dial dialFunc, b BridgeConfig, l net.Listener, fatal chan<- error) runningBridge {
 	switch b.Mode {
 	case "http":
-		return startHTTPBridge(ctx, dial, b, l, fatal), nil
+		return startHTTPBridge(ctx, dial, b, l, fatal)
 	default: // "tcp", the only other value checkBridges allows
-		return startTCPBridge(ctx, dial, b, l, fatal), nil
+		return startTCPBridge(ctx, dial, b, l, fatal)
 	}
 }
 

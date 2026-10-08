@@ -194,7 +194,8 @@ Each bridge entry:
 
 ```yaml
 - name: my-service          # unique identifier, used in logs and error messages
-  listen: /run/tsbridge/my-service.sock   # Unix socket path to create
+  listen: /run/tsbridge/my-service.sock   # Unix socket path to create, or tcp://host:port /
+                                          # udp://host:port -- see "TCP and UDP listeners" below
   target: remote-machine:1234             # host:port reachable over the tailnet
   mode: tcp                 # optional, defaults to "tcp" -- see "HTTP mode" below for the other option
   rewrite_host: false       # mode: http only, optional, defaults to false -- see "HTTP mode" below
@@ -205,6 +206,31 @@ Each bridge entry:
                              # doesn't create its socket; see "Runtime bridge management"
                              # below for enabling/disabling one without a restart
 ```
+
+### TCP and UDP listeners
+
+`listen` is a Unix socket path by default, but can also be a network
+address, so clients that can't use a Unix socket still reach the tailnet
+target:
+
+```yaml
+- name: web
+  listen: tcp://127.0.0.1:8080     # accepts TCP; mode: tcp (raw copy) or http both work
+  target: remote-machine:80
+- name: dns
+  listen: udp://127.0.0.1:5353     # relays datagrams; mode must be tcp (the default)
+  target: remote-machine:53
+```
+
+- A `udp://` bridge gives each client address its own tailnet-side UDP
+  flow, dropped after 60 s without traffic; at most 1024 clients at once
+  (excess datagrams are dropped, as UDP allows).
+- `socket_group` / `socket_mode` are rejected on these: a port has no file
+  permissions. **Anyone who can reach the address can use the bridge**, so
+  bind loopback (`127.0.0.1`); a non-loopback address is allowed but logs a
+  warning at startup.
+- `tcp://` and `udp://` addresses can be added through the management API
+  too (the absolute-path rule applies only to Unix socket paths).
 
 `bridges:` is a flat list — every service `tsbridge` proxies is one entry
 here, in the one `config.yaml` file. `name` and `listen` must each be

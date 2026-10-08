@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -39,7 +40,10 @@ var supportedBridgeModes = map[string]bool{
 // managed-bridges.yaml (see manage.go) -- both are "just another bridges:
 // list" in the same shape as config.yaml's.
 type BridgeConfig struct {
-	Name   string `yaml:"name" json:"name"`
+	Name string `yaml:"name" json:"name"`
+	// Listen is a Unix socket path, or tcp://host:port / udp://host:port to
+	// accept on a TCP or UDP port instead. Network listeners have no file
+	// permissions to restrict them: prefer a loopback address.
 	Listen string `yaml:"listen" json:"listen"`
 	Target string `yaml:"target" json:"target"`
 	// Mode selects how tsbridge handles the connection, not what network
@@ -193,7 +197,7 @@ func LoadConfig(path string) (*Config, error) {
 // otherwise it's resolved relative to baseDir, the config file's own
 // directory.
 func resolvePath(baseDir, p string) string {
-	if p == "" || filepath.IsAbs(p) {
+	if p == "" || filepath.IsAbs(p) || isNetworkListen(p) {
 		return p
 	}
 	return filepath.Join(baseDir, p)
@@ -230,6 +234,21 @@ func validateBridgeFields(b BridgeConfig) error {
 	}
 	if !supportedBridgeModes[b.Mode] {
 		return fmt.Errorf("bridge %q has unsupported mode %q; supported modes are tcp, http", b.Name, b.Mode)
+	}
+	if network, addr := parseListen(b.Listen); network != "unix" {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil || host == "" || port == "" {
+			return fmt.Errorf("bridge %q: listen %q must be %s://host:port (e.g. %s://127.0.0.1:8080)", b.Name, b.Listen, network, network)
+		}
+		if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
+			return fmt.Errorf("bridge %q: listen %q has an invalid port", b.Name, b.Listen)
+		}
+		if b.SocketGroup != "" || b.SocketMode != "" {
+			return fmt.Errorf("bridge %q sets socket_group/socket_mode, but those only apply to a Unix socket listen (bridge listens on %s)", b.Name, network)
+		}
+		if network == "udp" && b.Mode != "tcp" {
+			return fmt.Errorf("bridge %q: a udp:// listen relays datagrams and can't use mode: %s", b.Name, b.Mode)
+		}
 	}
 	if b.RewriteHost && b.Mode != "http" {
 		return fmt.Errorf("bridge %q sets rewrite_host, but that only applies to mode: http (bridge is mode: %s)", b.Name, b.Mode)
@@ -301,6 +320,25 @@ func validateControlURL(raw string) error {
 		return fmt.Errorf("must use https, got scheme %q -- a plaintext control server exposes registration and policy to tampering", u.Scheme)
 	}
 	return nil
+}
+
+// isNetworkListen reports whether a listen value is a tcp:// or udp://
+// address rather than a Unix socket path.
+func isNetworkListen(listen string) bool {
+	network, _ := parseListen(listen)
+	return network != "unix"
+}
+
+// parseListen splits a bridge's listen value into the network to bind and
+// its address. "tcp://host:port" and "udp://host:port" bind that network;
+// anything else is a Unix socket path, so existing configs are unchanged.
+func parseListen(listen string) (network, addr string) {
+	for _, n := range []string{"tcp", "udp"} {
+		if rest, ok := strings.CutPrefix(listen, n+"://"); ok {
+			return n, rest
+		}
+	}
+	return "unix", listen
 }
 
 func parseSocketMode(s string) (os.FileMode, error) {

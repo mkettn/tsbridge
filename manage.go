@@ -233,7 +233,7 @@ func (m *bridgeManager) startAll(staticBridges []BridgeConfig) (started, attempt
 			log.Printf("management: skipping invalid entry in %s: %v", m.statePath, err)
 			continue
 		}
-		if !filepath.IsAbs(b.Listen) {
+		if !isNetworkListen(b.Listen) && !filepath.IsAbs(b.Listen) {
 			log.Printf("management: skipping %q in %s: listen path must be absolute (got %q)", b.Name, m.statePath, b.Listen)
 			continue
 		}
@@ -336,7 +336,7 @@ func (m *bridgeManager) Add(cfg BridgeConfig) (bridgeInfo, error) {
 	if err := validateBridgeFields(cfg); err != nil {
 		return bridgeInfo{}, badRequest("%s", err)
 	}
-	if !filepath.IsAbs(cfg.Listen) {
+	if !isNetworkListen(cfg.Listen) && !filepath.IsAbs(cfg.Listen) {
 		return bridgeInfo{}, badRequest("bridge %q: listen path must be absolute when added through the management API (got %q)", cfg.Name, cfg.Listen)
 	}
 	if cfg.Listen == m.managementSocket {
