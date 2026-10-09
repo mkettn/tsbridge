@@ -32,7 +32,7 @@ type udpBridge struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	health *dialHealth
-	idle   time.Duration
+	idle   time.Duration // set once at construction, never written again
 
 	wg       sync.WaitGroup
 	mu       sync.Mutex
@@ -42,9 +42,12 @@ type udpBridge struct {
 type udpSession struct {
 	remote net.Conn
 	last   time.Time // guarded by udpBridge.mu
+	// writeFailed is only touched by pump; it limits the reply-write
+	// failure log to one line per session.
+	writeFailed bool
 }
 
-func startUDPBridge(ctx context.Context, dial dialFunc, b BridgeConfig, addr string, fatal chan<- error) (runningBridge, error) {
+func startUDPBridge(ctx context.Context, dial dialFunc, b BridgeConfig, addr string, idle time.Duration, fatal chan<- error) (runningBridge, error) {
 	pc, err := net.ListenPacket("udp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("listening on udp %s: %w", addr, err)
@@ -55,7 +58,7 @@ func startUDPBridge(ctx context.Context, dial dialFunc, b BridgeConfig, addr str
 	health := &dialHealth{}
 	u := &udpBridge{
 		name: b.Name, target: b.Target, pc: pc, dial: health.wrap(dial),
-		ctx: ctx, cancel: cancel, health: health, idle: udpSessionIdleTimeout,
+		ctx: ctx, cancel: cancel, health: health, idle: idle,
 		sessions: map[string]*udpSession{},
 	}
 	u.wg.Add(1)
@@ -93,7 +96,10 @@ func (u *udpBridge) readLoop(fatal chan<- error) {
 }
 
 // session returns the client's tailnet-side connection, dialing one on the
-// first datagram. A nil result means the datagram is dropped (dial failed,
+// first datagram. It must only be called from readLoop: the unlocked dial
+// between the two critical sections below, and pump's deferred delete of its
+// own key, are only safe because no second caller can add the same key
+// concurrently. A nil result means the datagram is dropped (dial failed,
 // or the session cap is reached) -- as with any UDP loss, the client's own
 // retry logic is the recovery path.
 func (u *udpBridge) session(client net.Addr) *udpSession {
@@ -160,7 +166,10 @@ func (u *udpBridge) pump(key string, client net.Addr, s *udpSession) {
 		u.mu.Lock()
 		s.last = time.Now()
 		u.mu.Unlock()
-		u.pc.WriteTo(buf[:n], client)
+		if _, err := u.pc.WriteTo(buf[:n], client); err != nil && !s.writeFailed {
+			s.writeFailed = true
+			log.Printf("bridge %s: udp reply to client %s failed (further failures for this session not logged): %v", u.name, client, err)
+		}
 	}
 }
 

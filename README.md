@@ -227,7 +227,10 @@ so clients that can't use a Unix socket still reach the tailnet target:
   and the host is an IP literal (`127.0.0.1`, `0.0.0.0`, `[::1]`) or
   `localhost`. Everything else is a Unix socket path, as before -- even a
   name containing a colon, such as `svc.socket:80` (a file literally named
-  that); there is no "port on a socket".
+  that); there is no "port on a socket". `:8080` (no host) is likewise a socket
+  path, not "all interfaces" -- write `0.0.0.0:8080`. Unbracketed IPv6
+  (`::1:8080`) is rejected; use `[::1]:8080`. A TCP and a UDP bridge may
+  share one `host:port` (e.g. DNS on 53).
 - A `udp` bridge gives each client address its own tailnet-side UDP flow,
   dropped after 60 s without traffic; at most 1024 clients at once (excess
   datagrams are dropped, as UDP allows).

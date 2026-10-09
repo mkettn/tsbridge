@@ -217,7 +217,7 @@ func (m *bridgeManager) startAll(staticBridges []BridgeConfig) (started, attempt
 	listens := map[string]bool{}
 	for _, b := range staticBridges {
 		names[b.Name] = true
-		listens[b.Listen] = true
+		listens[listenKey(b)] = true
 		s, a := m.startLocked(b, "config")
 		if s {
 			started++
@@ -245,12 +245,12 @@ func (m *bridgeManager) startAll(staticBridges []BridgeConfig) (started, attempt
 			log.Printf("management: skipping %q in %s: duplicate bridge name", b.Name, m.statePath)
 			continue
 		}
-		if listens[b.Listen] {
+		if listens[listenKey(b)] {
 			log.Printf("management: skipping %q in %s: duplicate listen path %q", b.Name, m.statePath, b.Listen)
 			continue
 		}
 		names[b.Name] = true
-		listens[b.Listen] = true
+		listens[listenKey(b)] = true
 		s, a := m.startLocked(b, "managed")
 		if s {
 			started++
@@ -356,7 +356,7 @@ func (m *bridgeManager) Add(cfg BridgeConfig) (bridgeInfo, error) {
 		return bridgeInfo{}, conflictErr("bridge %q already exists", cfg.Name)
 	}
 	for _, e := range m.entries {
-		if e.cfg.Listen == cfg.Listen {
+		if listenKey(e.cfg) == listenKey(cfg) {
 			return bridgeInfo{}, conflictErr("listen path %q is already in use by bridge %q", cfg.Listen, e.cfg.Name)
 		}
 	}

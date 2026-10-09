@@ -124,15 +124,10 @@ func (h *dialHealth) snapshot() healthSnapshot {
 // (non-blocking) so the caller can shut the whole process down rather
 // than leaving a dead bridge silently bound but unserved.
 func startBridge(ctx context.Context, dial dialFunc, b BridgeConfig, sockMode os.FileMode, group string, fatal chan<- error) (runningBridge, error) {
-	sockMode, group, err := resolveSocketPerms(b, sockMode, group)
-	if err != nil {
-		return nil, err
-	}
-
 	network, addr := parseListen(b)
 	switch network {
 	case "udp":
-		return startUDPBridge(ctx, dial, b, addr, fatal)
+		return startUDPBridge(ctx, dial, b, addr, udpSessionIdleTimeout, fatal)
 	case "tcp":
 		l, err := net.Listen("tcp", addr)
 		if err != nil {
@@ -142,6 +137,10 @@ func startBridge(ctx context.Context, dial dialFunc, b BridgeConfig, sockMode os
 		return startListener(ctx, dial, b, l, fatal), nil
 	}
 
+	sockMode, group, err := resolveSocketPerms(b, sockMode, group)
+	if err != nil {
+		return nil, err
+	}
 	l, err := createUnixSocket(b.Listen, sockMode, group)
 	if err != nil {
 		return nil, err

@@ -135,12 +135,11 @@ func TestUDPBridge_IdleSessionExpires(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	addr := freeUDPAddr(t)
-	rb, err := startUDPBridge(ctx, dial, BridgeConfig{Name: "idle", Target: "x:1"}, addr, make(chan error, 1))
+	rb, err := startUDPBridge(ctx, dial, BridgeConfig{Name: "idle", Target: "x:1"}, addr, 50*time.Millisecond, make(chan error, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
 	u := rb.(*udpBridge)
-	u.idle = 50 * time.Millisecond
 	defer shutdown(t, cancel, rb)
 
 	c, _ := net.Dial("udp", addr)
@@ -183,6 +182,9 @@ func TestParseListen(t *testing.T) {
 		{"svc.socket:80", "tcp", "unix"},
 		{"./SVC.socket:80", "tcp", "unix"},
 		{":8080", "tcp", "unix"},
+		{"::1:8080", "tcp", "tcp"},
+		{"fe80::1:8080", "tcp", "tcp"},
+		{"/run/a:b:c.sock", "tcp", "unix"},
 		{"x.sock", "http", "unix"},
 	}
 	for _, tc := range tests {
@@ -205,6 +207,7 @@ func TestValidateBridgeFields_NetworkListen(t *testing.T) {
 		{"http on port ok", func(b *BridgeConfig) { b.Listen = "127.0.0.1:8080"; b.Mode = "http" }, ""},
 		{"udp no port", func(b *BridgeConfig) { b.Listen = "127.0.0.1"; b.Mode = "udp" }, "must be host:port"},
 		{"udp path", func(b *BridgeConfig) { b.Listen = "/run/x.sock"; b.Mode = "udp" }, "must be host:port"},
+		{"unbracketed ipv6", func(b *BridgeConfig) { b.Listen = "::1:8080" }, "IPv6 needs brackets"},
 		{"udp zero port", func(b *BridgeConfig) { b.Listen = "127.0.0.1:0"; b.Mode = "udp" }, "invalid port"},
 		{"socket_mode on tcp", func(b *BridgeConfig) { b.Listen = "127.0.0.1:80"; b.SocketMode = "0660" }, "only apply to a Unix socket"},
 		{"socket_group on udp", func(b *BridgeConfig) { b.Listen = "127.0.0.1:53"; b.Mode = "udp"; b.SocketGroup = "x" }, "only apply to a Unix socket"},
@@ -225,5 +228,18 @@ func TestValidateBridgeFields_NetworkListen(t *testing.T) {
 				t.Fatalf("err = %v; want containing %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestCheckBridges_TCPAndUDPMayShareAddress(t *testing.T) {
+	tcp := BridgeConfig{Name: "dns-tcp", Listen: "127.0.0.1:5353", Target: "ns:53", Mode: "tcp"}
+	udp := BridgeConfig{Name: "dns-udp", Listen: "127.0.0.1:5353", Target: "ns:53", Mode: "udp"}
+	if err := checkBridges([]BridgeConfig{tcp, udp}); err != nil {
+		t.Fatalf("tcp+udp on the same address should load: %v", err)
+	}
+	dup := tcp
+	dup.Name = "dns-tcp2"
+	if err := checkBridges([]BridgeConfig{tcp, dup}); err == nil || !strings.Contains(err.Error(), "duplicate listen address") {
+		t.Fatalf("two tcp binds of one address must collide, got: %v", err)
 	}
 }

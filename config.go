@@ -242,7 +242,7 @@ func validateBridgeFields(b BridgeConfig) error {
 	if network, addr := parseListen(b); network != "unix" {
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil || host == "" || port == "" {
-			return fmt.Errorf("bridge %q: listen %q must be host:port (e.g. 127.0.0.1:8080)", b.Name, b.Listen)
+			return fmt.Errorf("bridge %q: listen %q must be host:port (e.g. 127.0.0.1:8080; IPv6 needs brackets: [::1]:8080)", b.Name, b.Listen)
 		}
 		if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
 			return fmt.Errorf("bridge %q: listen %q has an invalid port", b.Name, b.Listen)
@@ -281,10 +281,14 @@ func checkBridges(bridges []BridgeConfig) error {
 			return fmt.Errorf("duplicate bridge name %q", b.Name)
 		}
 		names[b.Name] = true
-		if listens[b.Listen] {
+		if key := listenKey(b); listens[key] {
+			if n := listenNetwork(b); n != "unix" {
+				return fmt.Errorf("duplicate listen address %q on %s", b.Listen, n)
+			}
 			return fmt.Errorf("duplicate listen path %q", b.Listen)
+		} else {
+			listens[key] = true
 		}
-		listens[b.Listen] = true
 	}
 	return nil
 }
@@ -335,10 +339,19 @@ func isNetworkListen(b BridgeConfig) bool {
 // with a numeric port and a host tsbridge can actually bind -- an IP
 // literal (127.0.0.1, 0.0.0.0, [::1]) or "localhost". Everything else is a
 // Unix socket path (a relative one resolves against the config directory),
-// including names that merely contain a colon, like "svc.socket:80".
+// including names that merely contain a colon, like "svc.socket:80". Note
+// that ":8080" (no host) is therefore a socket path, not "all interfaces" --
+// write 0.0.0.0:8080 for that.
 func parseListen(b BridgeConfig) (network, addr string) {
 	if b.Mode == "udp" {
 		return "udp", b.Listen
+	}
+	if !filepath.IsAbs(b.Listen) && !strings.HasPrefix(b.Listen, "[") && strings.Count(b.Listen, ":") >= 2 {
+		// Unbracketed IPv6 + port (::1:8080): SplitHostPort can't parse it
+		// and it's not a credible socket filename, so claim it as TCP and
+		// let validateBridgeFields reject it with a useful message rather
+		// than silently creating a socket file named after the address.
+		return "tcp", b.Listen
 	}
 	if host, port, err := net.SplitHostPort(b.Listen); err == nil {
 		if _, err := strconv.ParseUint(port, 10, 16); err == nil {
@@ -348,6 +361,19 @@ func parseListen(b BridgeConfig) (network, addr string) {
 		}
 	}
 	return "unix", b.Listen
+}
+
+func listenNetwork(b BridgeConfig) string {
+	n, _ := parseListen(b)
+	return n
+}
+
+// listenKey identifies what a bridge binds for duplicate detection. TCP and
+// UDP are separate port spaces, so the same host:port may be bound once per
+// network (e.g. DNS on 53/tcp and 53/udp).
+func listenKey(b BridgeConfig) string {
+	n, addr := parseListen(b)
+	return n + "!" + addr
 }
 
 func parseSocketMode(s string) (os.FileMode, error) {
