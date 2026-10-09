@@ -53,7 +53,7 @@ func TestStartBridge_CreatesSocketWithModeAndRemovesStale(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	b := BridgeConfig{Name: "test", Listen: sockPath, Target: "example.invalid:1", Mode: "tcp"}
+	b := BridgeConfig{Name: "test", Listen: sockPath, Targets: Targets{"example.invalid:1"}, Mode: "tcp"}
 
 	fatal := make(chan error, 1)
 	rb, err := startBridge(ctx, failDial, b, 0640, "", fatal)
@@ -86,7 +86,7 @@ func TestStartBridge_RefusesToRemoveNonSocketFile(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	b := BridgeConfig{Name: "test", Listen: path, Target: "example.invalid:1", Mode: "tcp"}
+	b := BridgeConfig{Name: "test", Listen: path, Targets: Targets{"example.invalid:1"}, Mode: "tcp"}
 	fatal := make(chan error, 1)
 	_, err := startBridge(ctx, failDial, b, 0660, "", fatal)
 	if err == nil || !strings.Contains(err.Error(), "not a socket") {
@@ -115,7 +115,7 @@ func TestStartBridge_RefusesToStealLiveSocket(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	b := BridgeConfig{Name: "test", Listen: sockPath, Target: "example.invalid:1", Mode: "tcp"}
+	b := BridgeConfig{Name: "test", Listen: sockPath, Targets: Targets{"example.invalid:1"}, Mode: "tcp"}
 	fatal := make(chan error, 1)
 	_, err = startBridge(ctx, failDial, b, 0660, "", fatal)
 	if err == nil || !strings.Contains(err.Error(), "in use by another instance") {
@@ -134,7 +134,7 @@ func TestStartBridge_ChownsToGroup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	b := BridgeConfig{Name: "test", Listen: sockPath, Target: "example.invalid:1", Mode: "tcp"}
+	b := BridgeConfig{Name: "test", Listen: sockPath, Targets: Targets{"example.invalid:1"}, Mode: "tcp"}
 
 	fatal := make(chan error, 1)
 	rb, err := startBridge(ctx, failDial, b, 0660, "root", fatal)
@@ -217,7 +217,7 @@ func TestAcceptLoop_RetriesTemporaryThenReportsFatal(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	b := BridgeConfig{Name: "test-bridge", Listen: "/unused", Target: "example.invalid:1", Mode: "tcp"}
+	b := BridgeConfig{Name: "test-bridge", Listen: "/unused", Targets: Targets{"example.invalid:1"}, Mode: "tcp"}
 	var wg sync.WaitGroup
 	fatal := make(chan error, 1)
 
@@ -306,7 +306,7 @@ func TestStartHTTPBridge_ReverseProxiesToTarget(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	b := BridgeConfig{Name: "http-test", Listen: sockPath, Target: "example.invalid:80", Mode: "http"}
+	b := BridgeConfig{Name: "http-test", Listen: sockPath, Targets: Targets{"example.invalid:80"}, Mode: "http"}
 	fatal := make(chan error, 1)
 	rb, err := startBridge(ctx, dialToAddr(backendAddr), b, 0660, "", fatal)
 	if err != nil {
@@ -361,7 +361,7 @@ func TestStartHTTPBridge_RewriteHostSetsTargetHost(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	b := BridgeConfig{Name: "http-rewrite", Listen: sockPath, Target: "example.invalid:80", Mode: "http", RewriteHost: true}
+	b := BridgeConfig{Name: "http-rewrite", Listen: sockPath, Targets: Targets{"example.invalid:80"}, Mode: "http", RewriteHost: true}
 	fatal := make(chan error, 1)
 	rb, err := startBridge(ctx, dialToAddr(backendAddr), b, 0660, "", fatal)
 	if err != nil {
@@ -381,8 +381,8 @@ func TestStartHTTPBridge_RewriteHostSetsTargetHost(t *testing.T) {
 	// serve, notably) rather than whatever the client sent.
 	select {
 	case gotHost := <-hostCh:
-		if gotHost != b.Target {
-			t.Errorf("backend saw Host %q, want %q", gotHost, b.Target)
+		if gotHost != b.Targets[0] {
+			t.Errorf("backend saw Host %q, want %q", gotHost, b.Targets[0])
 		}
 	default:
 		t.Fatal("backend handler never ran")
@@ -399,7 +399,7 @@ func TestStartHTTPBridge_UnreachableTargetReturnsBadGateway(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	b := BridgeConfig{Name: "http-fail", Listen: sockPath, Target: "example.invalid:80", Mode: "http"}
+	b := BridgeConfig{Name: "http-fail", Listen: sockPath, Targets: Targets{"example.invalid:80"}, Mode: "http"}
 	fatal := make(chan error, 1)
 	rb, err := startBridge(ctx, dial, b, 0660, "", fatal)
 	if err != nil {
@@ -432,7 +432,7 @@ func TestStartHTTPBridge_ShutdownAlwaysUnlinksSocket(t *testing.T) {
 		sockPath := filepath.Join(dir, "race.sock")
 		ctx, cancel := context.WithCancel(context.Background())
 
-		b := BridgeConfig{Name: "race", Listen: sockPath, Target: "example.invalid:80", Mode: "http"}
+		b := BridgeConfig{Name: "race", Listen: sockPath, Targets: Targets{"example.invalid:80"}, Mode: "http"}
 		fatal := make(chan error, 1)
 		rb, err := startBridge(ctx, failDial, b, 0660, "", fatal)
 		if err != nil {
@@ -466,7 +466,7 @@ func TestStartBridge_RuntimeShutdownDoesNotReportFatal(t *testing.T) {
 	processCtx, stopProcess := context.WithCancel(context.Background())
 	defer stopProcess()
 
-	b := BridgeConfig{Name: "removed", Listen: sockPath, Target: "example.invalid:1", Mode: "tcp"}
+	b := BridgeConfig{Name: "removed", Listen: sockPath, Targets: Targets{"example.invalid:1"}, Mode: "tcp"}
 	fatal := make(chan error, 1)
 	rb, err := startBridge(processCtx, failDial, b, 0660, "", fatal)
 	if err != nil {
@@ -495,7 +495,7 @@ func TestStartHTTPBridge_RuntimeShutdownDoesNotReportFatal(t *testing.T) {
 	processCtx, stopProcess := context.WithCancel(context.Background())
 	defer stopProcess()
 
-	b := BridgeConfig{Name: "removed-http", Listen: sockPath, Target: "example.invalid:1", Mode: "http"}
+	b := BridgeConfig{Name: "removed-http", Listen: sockPath, Targets: Targets{"example.invalid:1"}, Mode: "http"}
 	fatal := make(chan error, 1)
 	rb, err := startBridge(processCtx, failDial, b, 0660, "", fatal)
 	if err != nil {
@@ -555,7 +555,7 @@ func TestStartBridge_DialHealthTracksFailureAndRecovery(t *testing.T) {
 			flaky := &flakyDial{backendAddr: backend.Addr().String()}
 			flaky.broken.Store(true)
 
-			b := BridgeConfig{Name: "health", Listen: sockPath, Target: "example.invalid:1", Mode: mode}
+			b := BridgeConfig{Name: "health", Listen: sockPath, Targets: Targets{"example.invalid:1"}, Mode: mode}
 			fatal := make(chan error, 1)
 			rb, err := startBridge(ctx, flaky.dial, b, 0660, "", fatal)
 			if err != nil {
@@ -633,7 +633,7 @@ func TestStartBridge_PerBridgeSocketModeOverridesGlobal(t *testing.T) {
 			sockPath := filepath.Join(t.TempDir(), "test.sock")
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			b := BridgeConfig{Name: "svc", Listen: sockPath, Target: "example.invalid:1", Mode: "tcp", SocketMode: tc.override}
+			b := BridgeConfig{Name: "svc", Listen: sockPath, Targets: Targets{"example.invalid:1"}, Mode: "tcp", SocketMode: tc.override}
 			rb, err := startBridge(ctx, failDial, b, 0660, "", make(chan error, 1))
 			if err != nil {
 				t.Fatalf("startBridge: %v", err)

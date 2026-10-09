@@ -74,11 +74,11 @@ func notFoundErr(format string, a ...any) error {
 // and managed-bridges.yaml don't tag their own entries, bridgeManager
 // does), Enabled/Running/Error, and the bridge's dial health.
 type bridgeInfo struct {
-	Name        string `json:"name"`
-	Listen      string `json:"listen"`
-	Target      string `json:"target"`
-	Mode        string `json:"mode"`
-	RewriteHost bool   `json:"rewrite_host"`
+	Name        string  `json:"name"`
+	Listen      string  `json:"listen"`
+	Target      Targets `json:"target"`
+	Mode        string  `json:"mode"`
+	RewriteHost bool    `json:"rewrite_host"`
 	// SocketGroup/SocketMode are the effective values: the bridge's own
 	// override if set, else the global socket_group/socket_mode.
 	// SocketGroup is empty when no group is applied.
@@ -576,7 +576,7 @@ func (m *bridgeManager) toBridgeInfo(e *managedEntry) bridgeInfo {
 	info := bridgeInfo{
 		Name:        e.cfg.Name,
 		Listen:      e.cfg.Listen,
-		Target:      e.cfg.Target,
+		Target:      e.cfg.Targets,
 		Mode:        e.cfg.Mode,
 		RewriteHost: e.cfg.RewriteHost,
 		SocketGroup: group,

@@ -196,7 +196,8 @@ Each bridge entry:
 - name: my-service          # unique identifier, used in logs and error messages
   listen: /run/tsbridge/my-service.sock   # Unix socket path to create, or a host:port --
                                           # see "TCP and UDP listeners" below
-  target: remote-machine:1234             # host:port reachable over the tailnet
+  target: [remote-machine:1234]           # list of host:port targets reachable over the tailnet --
+                                          # see "Multiple targets" below
   mode: tcp                 # optional, defaults to "tcp" -- see "HTTP mode" below for the other option
   rewrite_host: false       # mode: http only, optional, defaults to false -- see "HTTP mode" below
   socket_group: www-data    # optional, overrides the top-level socket_group for this socket only
@@ -207,6 +208,29 @@ Each bridge entry:
                              # below for enabling/disabling one without a restart
 ```
 
+### Multiple targets
+
+`target` is a list. With more than one entry, tsbridge picks them in
+round-robin order:
+
+```yaml
+- name: web
+  listen: /run/tsbridge/web.sock
+  target: [web-1:80, web-2:80, web-3:80]
+```
+
+- `tcp`: each accepted connection goes to the next target.
+- `http`: each request goes to the next target (`rewrite_host` uses the
+  chosen target's host).
+- `udp`: each new client address is assigned the next target and keeps it
+  until its session expires.
+- There is no failover or health checking: a connection whose target is
+  unreachable fails, and the next one tries the next target. Dial health in
+  `GET /bridges` covers all of a bridge's targets together.
+- A plain string (`target: host:80`) is still accepted as a single target,
+  with a deprecation warning in the log. The management API accepts a string
+  for `target` the same way but always returns a list.
+
 ### TCP and UDP listeners
 
 `listen` is a Unix socket path by default, but can also be a bind address,
@@ -215,11 +239,11 @@ so clients that can't use a Unix socket still reach the tailnet target:
 ```yaml
 - name: web
   listen: 127.0.0.1:8080   # host:port -> accepts TCP; mode: tcp (raw copy) or http both work
-  target: remote-machine:80
+  target: [remote-machine:80]
 - name: dns
   listen: 127.0.0.1:5353   # mode: udp -> listen is always a UDP bind address
   mode: udp
-  target: remote-machine:53
+  target: [remote-machine:53]
 ```
 
 - With `mode: udp`, `listen` must be a bind address: `host:port` with an IP literal or `localhost` as host (a Unix socket path is an error). With `tcp`/`http`,
@@ -361,7 +385,7 @@ It speaks plain JSON over HTTP on that socket:
 curl --unix-socket /run/tsbridge/control.sock \
   -X POST http://unix/bridges \
   -H 'content-type: application/json' \
-  -d '{"name":"svc","listen":"/run/tsbridge/svc.sock","target":"remote-machine:1234"}'
+  -d '{"name":"svc","listen":"/run/tsbridge/svc.sock","target":["remote-machine:1234"]}'
 
 # List every bridge tsbridge knows about.
 curl --unix-socket /run/tsbridge/control.sock http://unix/bridges
@@ -383,7 +407,7 @@ A healthy bridge in a `GET` response looks like this:
 {
   "name": "svc",
   "listen": "/run/tsbridge/svc.sock",
-  "target": "remote-machine:1234",
+  "target": ["remote-machine:1234"],
   "mode": "tcp",
   "rewrite_host": false,
   "source": "managed",
@@ -401,7 +425,7 @@ something's worth looking at:
 {
   "name": "svc",
   "listen": "/run/tsbridge/svc.sock",
-  "target": "remote-machine:1234",
+  "target": ["remote-machine:1234"],
   "mode": "tcp",
   "rewrite_host": false,
   "source": "managed",
@@ -720,7 +744,7 @@ to exercise `srv.Dial` without it.
    bridges:
      - name: echo-test
        listen: /tmp/tsbridge-test/run/echo-test.sock
-       target: echo-host:9999
+       target: [echo-host:9999]
    EOF
    ```
 

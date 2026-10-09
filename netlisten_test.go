@@ -2,11 +2,17 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"net"
+	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func freeTCPAddr(t *testing.T) string {
@@ -46,7 +52,7 @@ func TestStartBridge_TCPListenForwards(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	addr := freeTCPAddr(t)
-	b := BridgeConfig{Name: "tcp-listen", Listen: addr, Target: "example.invalid:1", Mode: "tcp"}
+	b := BridgeConfig{Name: "tcp-listen", Listen: addr, Targets: Targets{"example.invalid:1"}, Mode: "tcp"}
 	rb, err := startBridge(ctx, dialToAddr(backend.Addr().String()), b, 0660, "", make(chan error, 1))
 	if err != nil {
 		t.Fatal(err)
@@ -94,7 +100,7 @@ func TestStartBridge_UDPListenForwardsPerClient(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	addr := freeUDPAddr(t)
-	b := BridgeConfig{Name: "udp-listen", Listen: addr, Target: "example.invalid:1", Mode: "udp"}
+	b := BridgeConfig{Name: "udp-listen", Listen: addr, Targets: Targets{"example.invalid:1"}, Mode: "udp"}
 	rb, err := startBridge(ctx, dial, b, 0660, "", make(chan error, 1))
 	if err != nil {
 		t.Fatal(err)
@@ -135,7 +141,7 @@ func TestUDPBridge_IdleSessionExpires(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	addr := freeUDPAddr(t)
-	rb, err := startUDPBridge(ctx, dial, BridgeConfig{Name: "idle", Target: "x:1"}, addr, 50*time.Millisecond, make(chan error, 1))
+	rb, err := startUDPBridge(ctx, dial, BridgeConfig{Name: "idle", Targets: Targets{"x:1"}}, addr, 50*time.Millisecond, make(chan error, 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +205,7 @@ func TestParseListen(t *testing.T) {
 }
 
 func TestValidateBridgeFields_NetworkListen(t *testing.T) {
-	ok := BridgeConfig{Name: "n", Target: "t:1", Mode: "tcp"}
+	ok := BridgeConfig{Name: "n", Targets: Targets{"t:1"}, Mode: "tcp"}
 	tests := []struct {
 		name    string
 		mutate  func(*BridgeConfig)
@@ -237,8 +243,8 @@ func TestValidateBridgeFields_NetworkListen(t *testing.T) {
 }
 
 func TestCheckBridges_TCPAndUDPMayShareAddress(t *testing.T) {
-	tcp := BridgeConfig{Name: "dns-tcp", Listen: "127.0.0.1:5353", Target: "ns:53", Mode: "tcp"}
-	udp := BridgeConfig{Name: "dns-udp", Listen: "127.0.0.1:5353", Target: "ns:53", Mode: "udp"}
+	tcp := BridgeConfig{Name: "dns-tcp", Listen: "127.0.0.1:5353", Targets: Targets{"ns:53"}, Mode: "tcp"}
+	udp := BridgeConfig{Name: "dns-udp", Listen: "127.0.0.1:5353", Targets: Targets{"ns:53"}, Mode: "udp"}
 	if err := checkBridges([]BridgeConfig{tcp, udp}); err != nil {
 		t.Fatalf("tcp+udp on the same address should load: %v", err)
 	}
@@ -246,5 +252,135 @@ func TestCheckBridges_TCPAndUDPMayShareAddress(t *testing.T) {
 	dup.Name = "dns-tcp2"
 	if err := checkBridges([]BridgeConfig{tcp, dup}); err == nil || !strings.Contains(err.Error(), "duplicate listen address") {
 		t.Fatalf("two tcp binds of one address must collide, got: %v", err)
+	}
+}
+
+func TestRoundRobin(t *testing.T) {
+	rr := newRoundRobin([]string{"a", "b", "c"})
+	var got []string
+	for i := 0; i < 7; i++ {
+		got = append(got, rr.next())
+	}
+	if want := "a b c a b c a"; strings.Join(got, " ") != want {
+		t.Errorf("got %v, want %s", got, want)
+	}
+}
+
+func TestTargets_Unmarshal(t *testing.T) {
+	var y struct {
+		T Targets `yaml:"target"`
+	}
+	for in, want := range map[string]string{
+		"target: [a:1, b:2]":        "a:1 b:2",
+		"target: a:1":               "a:1",
+		"target:\n  - a:1\n  - b:2": "a:1 b:2",
+	} {
+		y.T = nil
+		if err := yaml.Unmarshal([]byte(in), &y); err != nil {
+			t.Fatalf("%q: %v", in, err)
+		}
+		if got := strings.Join(y.T, " "); got != want {
+			t.Errorf("%q: got %q, want %q", in, got, want)
+		}
+	}
+	if err := yaml.Unmarshal([]byte("target: {a: b}"), &y); err == nil {
+		t.Error("mapping target should be rejected")
+	}
+
+	for in, want := range map[string]string{
+		`{"target":["a:1","b:2"]}`: "a:1 b:2",
+		`{"target":"a:1"}`:         "a:1",
+	} {
+		var b BridgeConfig
+		if err := json.Unmarshal([]byte(in), &b); err != nil {
+			t.Fatalf("%s: %v", in, err)
+		}
+		if got := strings.Join(b.Targets, " "); got != want {
+			t.Errorf("%s: got %q, want %q", in, got, want)
+		}
+	}
+	out, _ := json.Marshal(BridgeConfig{Targets: Targets{"a:1"}})
+	if !strings.Contains(string(out), `"target":["a:1"]`) {
+		t.Errorf("marshal should emit a list: %s", out)
+	}
+}
+
+func TestValidateBridgeFields_Targets(t *testing.T) {
+	b := BridgeConfig{Name: "n", Listen: "/x.sock", Mode: "tcp"}
+	if err := validateBridgeFields(b); err == nil {
+		t.Error("no targets should be rejected")
+	}
+	b.Targets = Targets{"a:1", " "}
+	if err := validateBridgeFields(b); err == nil {
+		t.Error("blank target should be rejected")
+	}
+	b.Targets = Targets{"a:1", "b:2"}
+	if err := validateBridgeFields(b); err != nil {
+		t.Errorf("valid targets rejected: %v", err)
+	}
+}
+
+func TestTCPBridge_RoundRobinTargets(t *testing.T) {
+	var mu sync.Mutex
+	var dialed []string
+	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		mu.Lock()
+		dialed = append(dialed, addr)
+		mu.Unlock()
+		return nil, errors.New("no route")
+	}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b := BridgeConfig{Name: "rr", Mode: "tcp", Targets: Targets{"a:1", "b:2"}}
+	rb := startTCPBridge(ctx, dial, b, l, make(chan error, 1))
+	for i := 0; i < 4; i++ {
+		c, err := net.Dial("tcp", l.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, c) // returns when the bridge closes it after the failed dial
+		c.Close()
+	}
+	rb.Shutdown(ctx)
+	mu.Lock()
+	defer mu.Unlock()
+	if got := strings.Join(dialed, " "); got != "a:1 b:2 a:1 b:2" {
+		t.Errorf("dialed %q", got)
+	}
+}
+
+func TestHTTPBridge_RoundRobinTargets(t *testing.T) {
+	var mu sync.Mutex
+	var dialed []string
+	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
+		mu.Lock()
+		dialed = append(dialed, addr)
+		mu.Unlock()
+		return nil, errors.New("no route")
+	}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	b := BridgeConfig{Name: "rr-http", Mode: "http", Targets: Targets{"a:1", "b:2"}}
+	rb := startHTTPBridge(ctx, dial, b, l, make(chan error, 1))
+	defer rb.Shutdown(ctx)
+	for i := 0; i < 4; i++ {
+		resp, err := http.Get("http://" + l.Addr().String() + "/")
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got := strings.Join(dialed, " "); got != "a:1 b:2 a:1 b:2" {
+		t.Errorf("dialed %q", got)
 	}
 }

@@ -55,7 +55,7 @@ func TestBridgeManager_AddListGetRemove(t *testing.T) {
 	m, dir := newTestManager(t)
 	sockPath := filepath.Join(dir, "svc.sock")
 
-	added, err := m.Add(BridgeConfig{Name: "svc", Listen: sockPath, Target: "example.invalid:1"})
+	added, err := m.Add(BridgeConfig{Name: "svc", Listen: sockPath, Targets: Targets{"example.invalid:1"}})
 	if err != nil {
 		t.Fatalf("Add: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestBridgeManager_AddListGetRemove(t *testing.T) {
 
 func TestBridgeManager_AddRejectsRelativeListen(t *testing.T) {
 	m, _ := newTestManager(t)
-	_, err := m.Add(BridgeConfig{Name: "svc", Listen: "relative/path.sock", Target: "example.invalid:1"})
+	_, err := m.Add(BridgeConfig{Name: "svc", Listen: "relative/path.sock", Targets: Targets{"example.invalid:1"}})
 	if err == nil || !strings.Contains(err.Error(), "absolute") {
 		t.Fatalf("want error about absolute path, got: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestBridgeManager_AddRejectsRelativeListen(t *testing.T) {
 
 func TestBridgeManager_AddRejectsDuplicateName(t *testing.T) {
 	m, dir := newTestManager(t)
-	cfg := BridgeConfig{Name: "svc", Listen: filepath.Join(dir, "a.sock"), Target: "example.invalid:1"}
+	cfg := BridgeConfig{Name: "svc", Listen: filepath.Join(dir, "a.sock"), Targets: Targets{"example.invalid:1"}}
 	if _, err := m.Add(cfg); err != nil {
 		t.Fatalf("first Add: %v", err)
 	}
@@ -115,10 +115,10 @@ func TestBridgeManager_AddRejectsDuplicateName(t *testing.T) {
 func TestBridgeManager_AddRejectsDuplicateListen(t *testing.T) {
 	m, dir := newTestManager(t)
 	sockPath := filepath.Join(dir, "shared.sock")
-	if _, err := m.Add(BridgeConfig{Name: "a", Listen: sockPath, Target: "example.invalid:1"}); err != nil {
+	if _, err := m.Add(BridgeConfig{Name: "a", Listen: sockPath, Targets: Targets{"example.invalid:1"}}); err != nil {
 		t.Fatalf("first Add: %v", err)
 	}
-	_, err := m.Add(BridgeConfig{Name: "b", Listen: sockPath, Target: "example.invalid:2"})
+	_, err := m.Add(BridgeConfig{Name: "b", Listen: sockPath, Targets: Targets{"example.invalid:2"}})
 	if err == nil || !strings.Contains(err.Error(), "already in use") {
 		t.Fatalf("want duplicate-listen error, got: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestBridgeManager_AddRejectsDuplicateListen(t *testing.T) {
 
 func TestBridgeManager_AddRejectsInvalidFields(t *testing.T) {
 	m, _ := newTestManager(t)
-	_, err := m.Add(BridgeConfig{Name: "svc", Listen: "/tmp/x.sock", Target: "t:1", Mode: "bogus"})
+	_, err := m.Add(BridgeConfig{Name: "svc", Listen: "/tmp/x.sock", Targets: Targets{"t:1"}, Mode: "bogus"})
 	if err == nil || !strings.Contains(err.Error(), "unsupported mode") {
 		t.Fatalf("want unsupported-mode error, got: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestBridgeManager_PersistsAndReloadsAcrossRestart(t *testing.T) {
 	statePath := filepath.Join(dir, managedBridgesFileName)
 	sockPath := filepath.Join(dir, "svc.sock")
 
-	if _, err := m1.Add(BridgeConfig{Name: "svc", Listen: sockPath, Target: "example.invalid:1", Mode: "http"}); err != nil {
+	if _, err := m1.Add(BridgeConfig{Name: "svc", Listen: sockPath, Targets: Targets{"example.invalid:1"}, Mode: "http"}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 
@@ -194,7 +194,7 @@ func TestBridgeManager_StartAllSkipsManagedBridgeCollidingWithConfig(t *testing.
 	defer cancel()
 	m := newBridgeManager(ctx, failDial, 0660, "", statePath, "", fakeStatus)
 
-	static := []BridgeConfig{{Name: "dup", Listen: filepath.Join(dir, "other.sock"), Target: "t:2", Mode: "tcp"}}
+	static := []BridgeConfig{{Name: "dup", Listen: filepath.Join(dir, "other.sock"), Targets: Targets{"t:2"}, Mode: "tcp"}}
 	started, attempted, err := m.startAll(static)
 	if err != nil {
 		t.Fatalf("startAll: %v", err)
@@ -203,7 +203,7 @@ func TestBridgeManager_StartAllSkipsManagedBridgeCollidingWithConfig(t *testing.
 		t.Fatalf("want the config-sourced bridge to start and the colliding managed one to be skipped, got %d/%d", started, attempted)
 	}
 	list := m.List()
-	if len(list) != 1 || list[0].Name != "dup" || list[0].Source != "config" || list[0].Target != "t:2" {
+	if len(list) != 1 || list[0].Name != "dup" || list[0].Source != "config" || list[0].Target[0] != "t:2" {
 		t.Fatalf("want only the config-sourced bridge running, got: %+v", list)
 	}
 }
@@ -218,8 +218,8 @@ func TestBridgeManager_StartAllStillFatalOnDuplicateWithinConfig(t *testing.T) {
 	m := newBridgeManager(ctx, failDial, 0660, "", filepath.Join(dir, managedBridgesFileName), "", fakeStatus)
 
 	static := []BridgeConfig{
-		{Name: "dup", Listen: filepath.Join(dir, "a.sock"), Target: "t:1", Mode: "tcp"},
-		{Name: "dup", Listen: filepath.Join(dir, "b.sock"), Target: "t:2", Mode: "tcp"},
+		{Name: "dup", Listen: filepath.Join(dir, "a.sock"), Targets: Targets{"t:1"}, Mode: "tcp"},
+		{Name: "dup", Listen: filepath.Join(dir, "b.sock"), Targets: Targets{"t:2"}, Mode: "tcp"},
 	}
 	_, _, err := m.startAll(static)
 	if err == nil || !strings.Contains(err.Error(), "duplicate bridge name") {
@@ -234,11 +234,11 @@ func TestBridgeManager_RemoveConfigSourcedBridgeLeavesStateFileUntouched(t *test
 	defer cancel()
 	m := newBridgeManager(ctx, failDial, 0660, "", statePath, "", fakeStatus)
 
-	static := []BridgeConfig{{Name: "static-a", Listen: filepath.Join(dir, "static.sock"), Target: "t:1", Mode: "tcp"}}
+	static := []BridgeConfig{{Name: "static-a", Listen: filepath.Join(dir, "static.sock"), Targets: Targets{"t:1"}, Mode: "tcp"}}
 	if _, _, err := m.startAll(static); err != nil {
 		t.Fatalf("startAll: %v", err)
 	}
-	if _, err := m.Add(BridgeConfig{Name: "managed-a", Listen: filepath.Join(dir, "managed.sock"), Target: "t:2"}); err != nil {
+	if _, err := m.Add(BridgeConfig{Name: "managed-a", Listen: filepath.Join(dir, "managed.sock"), Targets: Targets{"t:2"}}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 
@@ -270,7 +270,7 @@ func TestBridgeManager_RemoveConfigSourcedBridgeLeavesStateFileUntouched(t *test
 func TestBridgeManager_FatalMarksDeadButKeepsEntry(t *testing.T) {
 	m, dir := newTestManager(t)
 	sockPath := filepath.Join(dir, "svc.sock")
-	cfg := BridgeConfig{Name: "svc", Listen: sockPath, Target: "example.invalid:1", Mode: "tcp"}
+	cfg := BridgeConfig{Name: "svc", Listen: sockPath, Targets: Targets{"example.invalid:1"}, Mode: "tcp"}
 
 	// Start the bridge and register it exactly like startLocked/Add
 	// would, but keep our own handle on fatalCh so the test can trigger
@@ -334,7 +334,7 @@ func TestBridgeManager_FatalMarksDeadButKeepsEntry(t *testing.T) {
 func TestBridgeManager_DeadManagedBridgeSurvivesUnrelatedWrite(t *testing.T) {
 	m, dir := newTestManager(t)
 
-	deadCfg := BridgeConfig{Name: "dead", Listen: filepath.Join(dir, "dead.sock"), Target: "t:1", Mode: "tcp"}
+	deadCfg := BridgeConfig{Name: "dead", Listen: filepath.Join(dir, "dead.sock"), Targets: Targets{"t:1"}, Mode: "tcp"}
 	fatalCh := make(chan error, 1)
 	rb, err := startBridge(m.ctx, m.dial, deadCfg, m.sockMode, m.group, fatalCh)
 	if err != nil {
@@ -358,7 +358,7 @@ func TestBridgeManager_DeadManagedBridgeSurvivesUnrelatedWrite(t *testing.T) {
 
 	// An unrelated Add, followed by its own Remove, each rewrite the
 	// state file via saveLocked -- "dead" must survive both.
-	if _, err := m.Add(BridgeConfig{Name: "other", Listen: filepath.Join(dir, "other.sock"), Target: "t:2"}); err != nil {
+	if _, err := m.Add(BridgeConfig{Name: "other", Listen: filepath.Join(dir, "other.sock"), Targets: Targets{"t:2"}}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if err := m.Remove("other"); err != nil {
@@ -390,7 +390,7 @@ func TestBridgeManager_WatchFatalIgnoresStaleSignalAfterNameReuse(t *testing.T) 
 
 	oldFatalCh := make(chan error, 1)
 	oldEntry := &managedEntry{
-		cfg:       BridgeConfig{Name: "svc", Listen: "/old.sock", Target: "t:1", Mode: "tcp"},
+		cfg:       BridgeConfig{Name: "svc", Listen: "/old.sock", Targets: Targets{"t:1"}, Mode: "tcp"},
 		rb:        &blockingBridge{release: make(chan struct{})},
 		source:    "managed",
 		fatalDone: make(chan struct{}),
@@ -405,7 +405,7 @@ func TestBridgeManager_WatchFatalIgnoresStaleSignalAfterNameReuse(t *testing.T) 
 	// registry, without oldEntry.fatalDone having been closed yet (the
 	// exact window the identity check has to handle).
 	newEntry := &managedEntry{
-		cfg:       BridgeConfig{Name: "svc", Listen: "/new.sock", Target: "t:2", Mode: "tcp"},
+		cfg:       BridgeConfig{Name: "svc", Listen: "/new.sock", Targets: Targets{"t:2"}, Mode: "tcp"},
 		rb:        &blockingBridge{release: make(chan struct{})},
 		source:    "managed",
 		fatalDone: make(chan struct{}),
@@ -448,7 +448,7 @@ func TestBridgeManager_WatchFatalIgnoresStaleSignalAfterDisableEnable(t *testing
 	oldFatalCh := make(chan error, 1)
 	oldDone := make(chan struct{})
 	entry := &managedEntry{
-		cfg:       BridgeConfig{Name: "svc", Listen: "/svc.sock", Target: "t:1", Mode: "tcp"},
+		cfg:       BridgeConfig{Name: "svc", Listen: "/svc.sock", Targets: Targets{"t:1"}, Mode: "tcp"},
 		rb:        &blockingBridge{release: make(chan struct{})},
 		source:    "managed",
 		fatalDone: oldDone,
@@ -518,7 +518,7 @@ func TestManagementHandler_ListAddGetDelete(t *testing.T) {
 	}
 
 	// Add.
-	body, _ := json.Marshal(BridgeConfig{Name: "svc", Listen: filepath.Join(dir, "svc.sock"), Target: "t:1"})
+	body, _ := json.Marshal(BridgeConfig{Name: "svc", Listen: filepath.Join(dir, "svc.sock"), Targets: Targets{"t:1"}})
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/bridges", bytes.NewReader(body)))
 	if rec.Code != http.StatusCreated {
@@ -589,7 +589,7 @@ func TestStartManagementServer_ServesOverUnixSocket(t *testing.T) {
 	defer shutdown(t, cancel, rb)
 
 	client := unixHTTPClient(sockPath)
-	body, _ := json.Marshal(BridgeConfig{Name: "svc", Listen: filepath.Join(dir, "svc.sock"), Target: "t:1"})
+	body, _ := json.Marshal(BridgeConfig{Name: "svc", Listen: filepath.Join(dir, "svc.sock"), Targets: Targets{"t:1"}})
 	resp, err := client.Post("http://unix/bridges", "application/json", bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("POST: %v", err)
@@ -658,7 +658,7 @@ func TestBridgeManager_RemoveDoesNotBlockOtherCallsDuringDrain(t *testing.T) {
 
 	release := make(chan struct{})
 	entry := &managedEntry{
-		cfg:       BridgeConfig{Name: "slow", Listen: filepath.Join(dir, "slow.sock"), Target: "t:1", Mode: "tcp"},
+		cfg:       BridgeConfig{Name: "slow", Listen: filepath.Join(dir, "slow.sock"), Targets: Targets{"t:1"}, Mode: "tcp"},
 		rb:        &blockingBridge{release: release},
 		source:    "managed",
 		fatalDone: make(chan struct{}),
@@ -687,7 +687,7 @@ func TestBridgeManager_RemoveDoesNotBlockOtherCallsDuringDrain(t *testing.T) {
 	go func() {
 		defer close(otherDone)
 		m.List()
-		if _, err := m.Add(BridgeConfig{Name: "other", Listen: filepath.Join(dir, "other.sock"), Target: "t:2"}); err != nil {
+		if _, err := m.Add(BridgeConfig{Name: "other", Listen: filepath.Join(dir, "other.sock"), Targets: Targets{"t:2"}}); err != nil {
 			t.Errorf("Add while slow Remove was draining: %v", err)
 		}
 	}()
@@ -715,7 +715,7 @@ func TestBridgeManager_AddRejectsManagementSocketPath(t *testing.T) {
 	defer cancel()
 	m := newBridgeManager(ctx, failDial, 0660, "", filepath.Join(dir, managedBridgesFileName), mgmtSock, fakeStatus)
 
-	_, err := m.Add(BridgeConfig{Name: "svc", Listen: mgmtSock, Target: "t:1"})
+	_, err := m.Add(BridgeConfig{Name: "svc", Listen: mgmtSock, Targets: Targets{"t:1"}})
 	if err == nil || !strings.Contains(err.Error(), "management socket") {
 		t.Fatalf("want error naming the management socket collision, got: %v", err)
 	}
@@ -804,7 +804,7 @@ func TestBridgeManager_StartAllSkipsDisabledBridges(t *testing.T) {
 	m := newBridgeManager(ctx, failDial, 0660, "", filepath.Join(dir, managedBridgesFileName), "", fakeStatus)
 
 	sockPath := filepath.Join(dir, "off.sock")
-	static := []BridgeConfig{{Name: "off", Listen: sockPath, Target: "t:1", Mode: "tcp", Enabled: boolPtr(false)}}
+	static := []BridgeConfig{{Name: "off", Listen: sockPath, Targets: Targets{"t:1"}, Mode: "tcp", Enabled: boolPtr(false)}}
 	started, attempted, err := m.startAll(static)
 	if err != nil {
 		t.Fatalf("startAll: %v", err)
@@ -828,7 +828,7 @@ func TestBridgeManager_DisableStopsAndPersists(t *testing.T) {
 	m, dir := newTestManager(t)
 	sockPath := filepath.Join(dir, "svc.sock")
 
-	if _, err := m.Add(BridgeConfig{Name: "svc", Listen: sockPath, Target: "t:1"}); err != nil {
+	if _, err := m.Add(BridgeConfig{Name: "svc", Listen: sockPath, Targets: Targets{"t:1"}}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 
@@ -865,7 +865,7 @@ func TestBridgeManager_EnableRestartsDisabledBridge(t *testing.T) {
 	m, dir := newTestManager(t)
 	sockPath := filepath.Join(dir, "svc.sock")
 
-	if _, err := m.Add(BridgeConfig{Name: "svc", Listen: sockPath, Target: "t:1", Enabled: boolPtr(false)}); err != nil {
+	if _, err := m.Add(BridgeConfig{Name: "svc", Listen: sockPath, Targets: Targets{"t:1"}, Enabled: boolPtr(false)}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	if _, err := os.Stat(sockPath); !os.IsNotExist(err) {
@@ -899,7 +899,7 @@ func TestBridgeManager_EnableRestartsDisabledBridge(t *testing.T) {
 func TestBridgeManager_EnableRetriesCrashedBridge(t *testing.T) {
 	m, dir := newTestManager(t)
 	sockPath := filepath.Join(dir, "svc.sock")
-	cfg := BridgeConfig{Name: "svc", Listen: sockPath, Target: "t:1", Mode: "tcp"}
+	cfg := BridgeConfig{Name: "svc", Listen: sockPath, Targets: Targets{"t:1"}, Mode: "tcp"}
 
 	fatalCh := make(chan error, 1)
 	rb, err := startBridge(m.ctx, m.dial, cfg, m.sockMode, m.group, fatalCh)
@@ -948,7 +948,7 @@ func TestBridgeManager_EnableFailurePersistsIntentEvenOnFailure(t *testing.T) {
 	m, dir := newTestManager(t)
 	sockPath := filepath.Join(dir, "svc.sock")
 
-	if _, err := m.Add(BridgeConfig{Name: "svc", Listen: sockPath, Target: "t:1", Enabled: boolPtr(false)}); err != nil {
+	if _, err := m.Add(BridgeConfig{Name: "svc", Listen: sockPath, Targets: Targets{"t:1"}, Enabled: boolPtr(false)}); err != nil {
 		t.Fatalf("Add: %v", err)
 	}
 	data, err := os.ReadFile(m.statePath)
@@ -990,10 +990,10 @@ func TestBridgeManager_EnableFailurePersistsIntentEvenOnFailure(t *testing.T) {
 func TestBridgeManager_AddConflictMessageDistinguishesDisabledFromCrashed(t *testing.T) {
 	m, dir := newTestManager(t)
 
-	if _, err := m.Add(BridgeConfig{Name: "off", Listen: filepath.Join(dir, "off.sock"), Target: "t:1", Enabled: boolPtr(false)}); err != nil {
+	if _, err := m.Add(BridgeConfig{Name: "off", Listen: filepath.Join(dir, "off.sock"), Targets: Targets{"t:1"}, Enabled: boolPtr(false)}); err != nil {
 		t.Fatalf("Add off: %v", err)
 	}
-	_, err := m.Add(BridgeConfig{Name: "off", Listen: filepath.Join(dir, "other.sock"), Target: "t:2"})
+	_, err := m.Add(BridgeConfig{Name: "off", Listen: filepath.Join(dir, "other.sock"), Targets: Targets{"t:2"}})
 	if err == nil || !strings.Contains(err.Error(), "disabled") || !strings.Contains(err.Error(), "enable it") {
 		t.Fatalf("want a conflict message naming it disabled and pointing at enable, got: %v", err)
 	}
@@ -1001,7 +1001,7 @@ func TestBridgeManager_AddConflictMessageDistinguishesDisabledFromCrashed(t *tes
 		t.Fatalf("want no <nil> noise for a disabled bridge's conflict, got: %v", err)
 	}
 
-	crashedCfg := BridgeConfig{Name: "crashed", Listen: filepath.Join(dir, "crashed.sock"), Target: "t:3", Mode: "tcp"}
+	crashedCfg := BridgeConfig{Name: "crashed", Listen: filepath.Join(dir, "crashed.sock"), Targets: Targets{"t:3"}, Mode: "tcp"}
 	fatalCh := make(chan error, 1)
 	rb, err := startBridge(m.ctx, m.dial, crashedCfg, m.sockMode, m.group, fatalCh)
 	if err != nil {
@@ -1016,7 +1016,7 @@ func TestBridgeManager_AddConflictMessageDistinguishesDisabledFromCrashed(t *tes
 	fatalCh <- errors.New("boom")
 	waitFor(t, func() bool { info, _ := m.Get("crashed"); return !info.Running })
 
-	_, err = m.Add(BridgeConfig{Name: "crashed", Listen: filepath.Join(dir, "other2.sock"), Target: "t:4"})
+	_, err = m.Add(BridgeConfig{Name: "crashed", Listen: filepath.Join(dir, "other2.sock"), Targets: Targets{"t:4"}})
 	if err == nil || !strings.Contains(err.Error(), "enable it to retry") {
 		t.Fatalf("want a conflict message mentioning retry via enable, got: %v", err)
 	}
@@ -1029,7 +1029,7 @@ func TestBridgeManager_DisableConfigSourcedBridgeLeavesStateFileUntouched(t *tes
 	defer cancel()
 	m := newBridgeManager(ctx, failDial, 0660, "", statePath, "", fakeStatus)
 
-	static := []BridgeConfig{{Name: "static-a", Listen: filepath.Join(dir, "static.sock"), Target: "t:1", Mode: "tcp"}}
+	static := []BridgeConfig{{Name: "static-a", Listen: filepath.Join(dir, "static.sock"), Targets: Targets{"t:1"}, Mode: "tcp"}}
 	if _, _, err := m.startAll(static); err != nil {
 		t.Fatalf("startAll: %v", err)
 	}
@@ -1050,7 +1050,7 @@ func TestManagementHandler_DisableEnable(t *testing.T) {
 	m, dir := newTestManager(t)
 	h := m.Handler()
 
-	body, _ := json.Marshal(BridgeConfig{Name: "svc", Listen: filepath.Join(dir, "svc.sock"), Target: "t:1"})
+	body, _ := json.Marshal(BridgeConfig{Name: "svc", Listen: filepath.Join(dir, "svc.sock"), Targets: Targets{"t:1"}})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest("POST", "/bridges", bytes.NewReader(body)))
 	if rec.Code != http.StatusCreated {

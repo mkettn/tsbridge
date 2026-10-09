@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
 	"os"
 	"os/user"
 	"strconv"
@@ -347,6 +346,7 @@ func (t *tcpBridge) dialHealth() healthSnapshot { return t.health.snapshot() }
 // keep the socket bound-but-dead with clients hanging in the backlog.
 func acceptLoop(ctx context.Context, dial dialFunc, b BridgeConfig, l net.Listener, wg *sync.WaitGroup, fatal chan<- error) {
 	backoff := acceptBackoffMin
+	rr := newRoundRobin(b.Targets)
 	for {
 		conn, err := l.Accept()
 		if err != nil {
@@ -370,10 +370,11 @@ func acceptLoop(ctx context.Context, dial dialFunc, b BridgeConfig, l net.Listen
 			return
 		}
 		backoff = acceptBackoffMin
+		target := rr.next()
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			handleConn(ctx, dial, b, conn)
+			handleConn(ctx, dial, b, target, conn)
 		}()
 	}
 }
@@ -384,18 +385,18 @@ func isTemporaryAcceptError(err error) bool {
 
 var connCounter uint64
 
-func handleConn(ctx context.Context, dial dialFunc, b BridgeConfig, local net.Conn) {
+func handleConn(ctx context.Context, dial dialFunc, b BridgeConfig, target string, local net.Conn) {
 	defer local.Close()
 	id := atomic.AddUint64(&connCounter, 1)
 
-	remote, err := dial(ctx, "tcp", b.Target)
+	remote, err := dial(ctx, "tcp", target)
 	if err != nil {
-		log.Printf("bridge %s: conn %d: dial %s failed: %v", b.Name, id, b.Target, err)
+		log.Printf("bridge %s: conn %d: dial %s failed: %v", b.Name, id, target, err)
 		return
 	}
 	defer remote.Close()
 
-	log.Printf("bridge %s: conn %d: opened (%s -> %s)", b.Name, id, b.Listen, b.Target)
+	log.Printf("bridge %s: conn %d: opened (%s -> %s)", b.Name, id, b.Listen, target)
 
 	var copyWG sync.WaitGroup
 	copyWG.Add(2)
@@ -440,22 +441,22 @@ func startHTTPBridge(ctx context.Context, dial dialFunc, b BridgeConfig, l net.L
 	ctx, cancel := context.WithCancel(ctx)
 	health := &dialHealth{}
 	dial = health.wrap(dial)
-	targetURL := &url.URL{Scheme: "http", Host: b.Target}
-	proxy := httputil.NewSingleHostReverseProxy(targetURL)
-	// NewSingleHostReverseProxy's default Director rewrites r.URL.Host
-	// (what gets dialed) but leaves r.Host -- the actual Host header
-	// sent on the wire -- as whatever arrived on the incoming request.
-	// That's the default here too (b.RewriteHost false): most backends
-	// don't care what Host they're addressed as. A virtual-host-style
-	// one does (tailscale serve, for one: it keys routes by the target
-	// node's own hostname, and 404s on anything else) -- rewrite_host:
-	// true forces r.Host to target's host so a backend like that
-	// recognizes the request as its own.
-	if b.RewriteHost {
-		defaultDirector := proxy.Director
-		proxy.Director = func(r *http.Request) {
-			defaultDirector(r)
-			r.Host = targetURL.Host
+	rr := newRoundRobin(b.Targets)
+	proxy := &httputil.ReverseProxy{}
+	// The Director picks the next target per request. It only sets what
+	// gets dialed (r.URL.Host); r.Host -- the Host header sent on the
+	// wire -- stays whatever the client sent, which is the default here
+	// (b.RewriteHost false): most backends don't care what Host they're
+	// addressed as. A virtual-host-style one does (tailscale serve, for
+	// one: it keys routes by the target node's own hostname, and 404s on
+	// anything else) -- rewrite_host: true forces r.Host to the chosen
+	// target's host so a backend like that recognizes the request.
+	proxy.Director = func(r *http.Request) {
+		target := rr.next()
+		r.URL.Scheme = "http"
+		r.URL.Host = target
+		if b.RewriteHost {
+			r.Host = target
 		}
 	}
 	proxy.Transport = &http.Transport{
@@ -464,11 +465,11 @@ func startHTTPBridge(ctx context.Context, dial dialFunc, b BridgeConfig, l net.L
 		},
 	}
 	proxy.ModifyResponse = func(resp *http.Response) error {
-		log.Printf("bridge %s: %s %s -> %s: %d", b.Name, resp.Request.Method, resp.Request.URL.RequestURI(), b.Target, resp.StatusCode)
+		log.Printf("bridge %s: %s %s -> %s: %d", b.Name, resp.Request.Method, resp.Request.URL.RequestURI(), resp.Request.URL.Host, resp.StatusCode)
 		return nil
 	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		log.Printf("bridge %s: %s %s -> %s: %v", b.Name, r.Method, r.URL.RequestURI(), b.Target, err)
+		log.Printf("bridge %s: %s %s -> %s: %v", b.Name, r.Method, r.URL.RequestURI(), r.URL.Host, err)
 		w.WriteHeader(http.StatusBadGateway)
 	}
 

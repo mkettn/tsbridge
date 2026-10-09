@@ -71,11 +71,11 @@ socket_mode: "0660"
 bridges:
   - name: my-service
     listen: /run/tsbridge/my-service.sock
-    target: remote-machine:1234
+    target: [remote-machine:1234]
     mode: tcp
   - name: my-http-service
     listen: /run/tsbridge/my-http-service.sock
-    target: other-machine:8080
+    target: [other-machine:8080]
     mode: http
     # mode: http only. Optional, defaults to false: the proxied request's
     # Host header passes through unchanged (whatever the client sent).
@@ -85,7 +85,7 @@ bridges:
     # rewrite_host: true
   - name: my-disabled-service
     listen: /run/tsbridge/my-disabled-service.sock
-    target: third-machine:9090
+    target: [third-machine:9090]
     # Optional, defaults to true. false defines the bridge (it shows up
     # in management_socket's GET /bridges, occupying this listen path)
     # but doesn't create its socket -- see README's "Runtime bridge
