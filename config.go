@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -32,6 +34,7 @@ const managedBridgesFileName = "managed-bridges.yaml"
 var supportedBridgeModes = map[string]bool{
 	"tcp":  true, // raw bidirectional byte copy
 	"http": true, // terminate HTTP and reverse-proxy to target
+	"udp":  true, // relay datagrams; listen is a UDP bind address (host:port)
 }
 
 // BridgeConfig is one listen-socket -> tailnet-target mapping. It doubles
@@ -39,14 +42,17 @@ var supportedBridgeModes = map[string]bool{
 // managed-bridges.yaml (see manage.go) -- both are "just another bridges:
 // list" in the same shape as config.yaml's.
 type BridgeConfig struct {
-	Name   string `yaml:"name" json:"name"`
+	Name string `yaml:"name" json:"name"`
+	// Listen is a Unix socket path, or a host:port to accept on a TCP port
+	// instead (always a UDP port for mode: udp). Network listeners have no
+	// file permissions to restrict them: prefer a loopback address.
 	Listen string `yaml:"listen" json:"listen"`
 	Target string `yaml:"target" json:"target"`
-	// Mode selects how tsbridge handles the connection, not what network
-	// it dials on the tailnet side -- that's always TCP regardless of
-	// Mode. "tcp" (the default if unset) does a raw bidirectional byte
-	// copy; "http" terminates HTTP on the socket and reverse-proxies
-	// each request to Target instead.
+	// Mode selects how tsbridge handles traffic. "tcp" (the default if
+	// unset) does a raw bidirectional byte copy; "http" terminates HTTP and
+	// reverse-proxies each request to Target instead; both dial Target over
+	// TCP. "udp" makes Listen a UDP bind address and relays datagrams to
+	// Target over UDP.
 	Mode string `yaml:"mode" json:"mode"`
 	// RewriteHost only applies to mode: http (rejected on any other
 	// mode). false (the default) forwards the request to Target with
@@ -109,8 +115,10 @@ func LoadConfig(path string) (*Config, error) {
 	baseDir := filepath.Dir(path)
 	bridges := raw.Bridges
 	for i := range bridges {
-		bridges[i].Listen = resolvePath(baseDir, bridges[i].Listen)
 		normalizeBridge(&bridges[i])
+		if !isNetworkListen(bridges[i]) {
+			bridges[i].Listen = resolvePath(baseDir, bridges[i].Listen)
+		}
 	}
 
 	if err := checkBridges(bridges); err != nil {
@@ -229,7 +237,22 @@ func validateBridgeFields(b BridgeConfig) error {
 		return fmt.Errorf("bridge %q is missing required field 'target'", b.Name)
 	}
 	if !supportedBridgeModes[b.Mode] {
-		return fmt.Errorf("bridge %q has unsupported mode %q; supported modes are tcp, http", b.Name, b.Mode)
+		return fmt.Errorf("bridge %q has unsupported mode %q; supported modes are tcp, http, udp", b.Name, b.Mode)
+	}
+	if network, addr := parseListen(b); network != "unix" {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil || host == "" || port == "" {
+			return fmt.Errorf("bridge %q: listen %q must be host:port (e.g. 127.0.0.1:8080; IPv6 needs brackets: [::1]:8080)", b.Name, b.Listen)
+		}
+		if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
+			return fmt.Errorf("bridge %q: listen %q has an invalid port", b.Name, b.Listen)
+		}
+		if !isBindHost(host) {
+			return fmt.Errorf("bridge %q: listen %q must be a bind address: an IP literal or localhost, then a port (e.g. 127.0.0.1:%s)", b.Name, b.Listen, port)
+		}
+		if b.SocketGroup != "" || b.SocketMode != "" {
+			return fmt.Errorf("bridge %q sets socket_group/socket_mode, but those only apply to a Unix socket listen (bridge listens on %s)", b.Name, network)
+		}
 	}
 	if b.RewriteHost && b.Mode != "http" {
 		return fmt.Errorf("bridge %q sets rewrite_host, but that only applies to mode: http (bridge is mode: %s)", b.Name, b.Mode)
@@ -261,10 +284,15 @@ func checkBridges(bridges []BridgeConfig) error {
 			return fmt.Errorf("duplicate bridge name %q", b.Name)
 		}
 		names[b.Name] = true
-		if listens[b.Listen] {
+		network, _ := parseListen(b)
+		key := listenKey(b)
+		if listens[key] {
+			if network != "unix" {
+				return fmt.Errorf("duplicate listen address %q on %s", b.Listen, network)
+			}
 			return fmt.Errorf("duplicate listen path %q", b.Listen)
 		}
-		listens[b.Listen] = true
+		listens[key] = true
 	}
 	return nil
 }
@@ -301,6 +329,59 @@ func validateControlURL(raw string) error {
 		return fmt.Errorf("must use https, got scheme %q -- a plaintext control server exposes registration and policy to tampering", u.Scheme)
 	}
 	return nil
+}
+
+// isNetworkListen reports whether the bridge binds a TCP/UDP address
+// rather than a Unix socket path.
+func isNetworkListen(b BridgeConfig) bool {
+	network, _ := parseListen(b)
+	return network != "unix"
+}
+
+// parseListen says what the bridge binds. mode: udp always listens on a
+// UDP address. Otherwise listen is a TCP address only when it's host:port
+// with a numeric port and a host tsbridge can actually bind -- an IP
+// literal (127.0.0.1, 0.0.0.0, [::1]) or "localhost". Everything else is a
+// Unix socket path (a relative one resolves against the config directory),
+// including names that merely contain a colon, like "svc.socket:80". Note
+// that ":8080" (no host) is therefore a socket path, not "all interfaces" --
+// write 0.0.0.0:8080 for that. Known limit: a bare name with two or more
+// colons and no "/" (e.g. "a:b:c.sock") is taken for an unbracketed IPv6
+// address and rejected; write "./a:b:c.sock".
+func parseListen(b BridgeConfig) (network, addr string) {
+	if b.Mode == "udp" {
+		return "udp", b.Listen
+	}
+	if !strings.Contains(b.Listen, "/") && !strings.HasPrefix(b.Listen, "[") && strings.Count(b.Listen, ":") >= 2 {
+		// Unbracketed IPv6 + port (::1:8080): SplitHostPort can't parse it
+		// and it's not a credible socket filename, so claim it as TCP and
+		// let validateBridgeFields reject it with a useful message rather
+		// than silently creating a socket file named after the address.
+		return "tcp", b.Listen
+	}
+	if host, port, err := net.SplitHostPort(b.Listen); err == nil {
+		if _, err := strconv.ParseUint(port, 10, 16); err == nil {
+			if isBindHost(host) {
+				return "tcp", b.Listen
+			}
+		}
+	}
+	return "unix", b.Listen
+}
+
+// listenKey identifies what a bridge binds for duplicate detection. TCP and
+// UDP are separate port spaces, so the same host:port may be bound once per
+// network (e.g. DNS on 53/tcp and 53/udp).
+// isBindHost reports whether host is something a listener can bind: an IP
+// literal or "localhost" (hostnames in general aren't local addresses).
+func isBindHost(host string) bool {
+	_, err := netip.ParseAddr(host)
+	return err == nil || host == "localhost"
+}
+
+func listenKey(b BridgeConfig) string {
+	n, addr := parseListen(b)
+	return n + "!" + addr
 }
 
 func parseSocketMode(s string) (os.FileMode, error) {

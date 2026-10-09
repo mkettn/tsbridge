@@ -126,7 +126,7 @@ func TestBridgeManager_AddRejectsDuplicateListen(t *testing.T) {
 
 func TestBridgeManager_AddRejectsInvalidFields(t *testing.T) {
 	m, _ := newTestManager(t)
-	_, err := m.Add(BridgeConfig{Name: "svc", Listen: "/tmp/x.sock", Target: "t:1", Mode: "udp"})
+	_, err := m.Add(BridgeConfig{Name: "svc", Listen: "/tmp/x.sock", Target: "t:1", Mode: "bogus"})
 	if err == nil || !strings.Contains(err.Error(), "unsupported mode") {
 		t.Fatalf("want unsupported-mode error, got: %v", err)
 	}
@@ -765,7 +765,7 @@ func TestBridgeManager_StartAllNormalizesAndToleratesBadManagedEntries(t *testin
   - name: bad-mode
     listen: ` + filepath.Join(dir, "bad.sock") + `
     target: t:2
-    mode: udp
+    mode: bogus
   - name: relative-listen
     listen: relative.sock
     target: t:3

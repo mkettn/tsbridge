@@ -76,10 +76,10 @@ bridges:
   - name: svc
     listen: /run/svc.sock
     target: h:1
-    mode: udp
+    mode: bogus
 `)
 	_, err := LoadConfig(filepath.Join(dir, "config.yaml"))
-	if err == nil || !strings.Contains(err.Error(), `unsupported mode "udp"`) {
+	if err == nil || !strings.Contains(err.Error(), `unsupported mode "bogus"`) {
 		t.Fatalf("want error naming unsupported mode, got: %v", err)
 	}
 }

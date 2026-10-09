@@ -217,7 +217,7 @@ func (m *bridgeManager) startAll(staticBridges []BridgeConfig) (started, attempt
 	listens := map[string]bool{}
 	for _, b := range staticBridges {
 		names[b.Name] = true
-		listens[b.Listen] = true
+		listens[listenKey(b)] = true
 		s, a := m.startLocked(b, "config")
 		if s {
 			started++
@@ -233,7 +233,7 @@ func (m *bridgeManager) startAll(staticBridges []BridgeConfig) (started, attempt
 			log.Printf("management: skipping invalid entry in %s: %v", m.statePath, err)
 			continue
 		}
-		if !filepath.IsAbs(b.Listen) {
+		if !isNetworkListen(b) && !filepath.IsAbs(b.Listen) {
 			log.Printf("management: skipping %q in %s: listen path must be absolute (got %q)", b.Name, m.statePath, b.Listen)
 			continue
 		}
@@ -245,12 +245,12 @@ func (m *bridgeManager) startAll(staticBridges []BridgeConfig) (started, attempt
 			log.Printf("management: skipping %q in %s: duplicate bridge name", b.Name, m.statePath)
 			continue
 		}
-		if listens[b.Listen] {
-			log.Printf("management: skipping %q in %s: duplicate listen path %q", b.Name, m.statePath, b.Listen)
+		if listens[listenKey(b)] {
+			log.Printf("management: skipping %q in %s: duplicate listen %q", b.Name, m.statePath, b.Listen)
 			continue
 		}
 		names[b.Name] = true
-		listens[b.Listen] = true
+		listens[listenKey(b)] = true
 		s, a := m.startLocked(b, "managed")
 		if s {
 			started++
@@ -336,7 +336,7 @@ func (m *bridgeManager) Add(cfg BridgeConfig) (bridgeInfo, error) {
 	if err := validateBridgeFields(cfg); err != nil {
 		return bridgeInfo{}, badRequest("%s", err)
 	}
-	if !filepath.IsAbs(cfg.Listen) {
+	if !isNetworkListen(cfg) && !filepath.IsAbs(cfg.Listen) {
 		return bridgeInfo{}, badRequest("bridge %q: listen path must be absolute when added through the management API (got %q)", cfg.Name, cfg.Listen)
 	}
 	if cfg.Listen == m.managementSocket {
@@ -356,8 +356,8 @@ func (m *bridgeManager) Add(cfg BridgeConfig) (bridgeInfo, error) {
 		return bridgeInfo{}, conflictErr("bridge %q already exists", cfg.Name)
 	}
 	for _, e := range m.entries {
-		if e.cfg.Listen == cfg.Listen {
-			return bridgeInfo{}, conflictErr("listen path %q is already in use by bridge %q", cfg.Listen, e.cfg.Name)
+		if listenKey(e.cfg) == listenKey(cfg) {
+			return bridgeInfo{}, conflictErr("listen %q is already in use by bridge %q", cfg.Listen, e.cfg.Name)
 		}
 	}
 
