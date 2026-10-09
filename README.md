@@ -222,7 +222,7 @@ so clients that can't use a Unix socket still reach the tailnet target:
   target: remote-machine:53
 ```
 
-- With `mode: udp`, `listen` must be `host:port`. With `tcp`/`http`,
+- With `mode: udp`, `listen` must be a bind address: `host:port` with an IP literal or `localhost` as host (a Unix socket path is an error). With `tcp`/`http`,
   `listen` is a TCP address only if it is `host:port` with a numeric port
   and the host is an IP literal (`127.0.0.1`, `0.0.0.0`, `[::1]`) or
   `localhost`. Everything else is a Unix socket path, as before -- even a

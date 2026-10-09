@@ -209,6 +209,8 @@ func TestValidateBridgeFields_NetworkListen(t *testing.T) {
 		{"udp ok", func(b *BridgeConfig) { b.Listen = "127.0.0.1:5353"; b.Mode = "udp" }, ""},
 		{"http on port ok", func(b *BridgeConfig) { b.Listen = "127.0.0.1:8080"; b.Mode = "http" }, ""},
 		{"udp no port", func(b *BridgeConfig) { b.Listen = "127.0.0.1"; b.Mode = "udp" }, "must be host:port"},
+		{"udp hostname", func(b *BridgeConfig) { b.Listen = "svc.socket:53"; b.Mode = "udp" }, "must be a bind address"},
+		{"udp localhost ok", func(b *BridgeConfig) { b.Listen = "localhost:53"; b.Mode = "udp" }, ""},
 		{"udp path", func(b *BridgeConfig) { b.Listen = "/run/x.sock"; b.Mode = "udp" }, "must be host:port"},
 		{"unbracketed ipv6", func(b *BridgeConfig) { b.Listen = "::1:8080" }, "IPv6 needs brackets"},
 		{"udp zero port", func(b *BridgeConfig) { b.Listen = "127.0.0.1:0"; b.Mode = "udp" }, "invalid port"},

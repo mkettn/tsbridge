@@ -247,6 +247,9 @@ func validateBridgeFields(b BridgeConfig) error {
 		if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
 			return fmt.Errorf("bridge %q: listen %q has an invalid port", b.Name, b.Listen)
 		}
+		if !isBindHost(host) {
+			return fmt.Errorf("bridge %q: listen %q must be a bind address: an IP literal or localhost, then a port (e.g. 127.0.0.1:%s)", b.Name, b.Listen, port)
+		}
 		if b.SocketGroup != "" || b.SocketMode != "" {
 			return fmt.Errorf("bridge %q sets socket_group/socket_mode, but those only apply to a Unix socket listen (bridge listens on %s)", b.Name, network)
 		}
@@ -358,7 +361,7 @@ func parseListen(b BridgeConfig) (network, addr string) {
 	}
 	if host, port, err := net.SplitHostPort(b.Listen); err == nil {
 		if _, err := strconv.ParseUint(port, 10, 16); err == nil {
-			if _, err := netip.ParseAddr(host); err == nil || host == "localhost" {
+			if isBindHost(host) {
 				return "tcp", b.Listen
 			}
 		}
@@ -369,6 +372,13 @@ func parseListen(b BridgeConfig) (network, addr string) {
 // listenKey identifies what a bridge binds for duplicate detection. TCP and
 // UDP are separate port spaces, so the same host:port may be bound once per
 // network (e.g. DNS on 53/tcp and 53/udp).
+// isBindHost reports whether host is something a listener can bind: an IP
+// literal or "localhost" (hostnames in general aren't local addresses).
+func isBindHost(host string) bool {
+	_, err := netip.ParseAddr(host)
+	return err == nil || host == "localhost"
+}
+
 func listenKey(b BridgeConfig) string {
 	n, addr := parseListen(b)
 	return n + "!" + addr
