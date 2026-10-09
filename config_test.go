@@ -55,13 +55,13 @@ bridges:
 	for _, b := range cfg.Bridges {
 		byName[b.Name] = b
 	}
-	if byName["svc-a"].Target != "host-a:1111" {
+	if byName["svc-a"].Targets[0] != "host-a:1111" {
 		t.Errorf("svc-a not resolved correctly: %+v", byName["svc-a"])
 	}
 	if byName["svc-a"].Mode != "tcp" {
 		t.Errorf("svc-a mode: want lowercased %q, got %q", "tcp", byName["svc-a"].Mode)
 	}
-	if byName["svc-b"].Target != "host-b:2222" {
+	if byName["svc-b"].Targets[0] != "host-b:2222" {
 		t.Errorf("svc-b not resolved correctly: %+v", byName["svc-b"])
 	}
 	if byName["svc-b"].Mode != "tcp" {
