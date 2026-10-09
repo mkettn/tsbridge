@@ -185,6 +185,9 @@ func TestParseListen(t *testing.T) {
 		{"::1:8080", "tcp", "tcp"},
 		{"fe80::1:8080", "tcp", "tcp"},
 		{"/run/a:b:c.sock", "tcp", "unix"},
+		{"run/a:b:c.sock", "tcp", "unix"},
+		{"./a:b:c.sock", "tcp", "unix"},
+		{"a:b:c.sock", "tcp", "tcp"}, // documented limit: taken for bare IPv6
 		{"x.sock", "http", "unix"},
 	}
 	for _, tc := range tests {

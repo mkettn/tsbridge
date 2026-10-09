@@ -281,14 +281,15 @@ func checkBridges(bridges []BridgeConfig) error {
 			return fmt.Errorf("duplicate bridge name %q", b.Name)
 		}
 		names[b.Name] = true
-		if key := listenKey(b); listens[key] {
-			if n := listenNetwork(b); n != "unix" {
-				return fmt.Errorf("duplicate listen address %q on %s", b.Listen, n)
+		network, _ := parseListen(b)
+		key := listenKey(b)
+		if listens[key] {
+			if network != "unix" {
+				return fmt.Errorf("duplicate listen address %q on %s", b.Listen, network)
 			}
 			return fmt.Errorf("duplicate listen path %q", b.Listen)
-		} else {
-			listens[key] = true
 		}
+		listens[key] = true
 	}
 	return nil
 }
@@ -341,12 +342,14 @@ func isNetworkListen(b BridgeConfig) bool {
 // Unix socket path (a relative one resolves against the config directory),
 // including names that merely contain a colon, like "svc.socket:80". Note
 // that ":8080" (no host) is therefore a socket path, not "all interfaces" --
-// write 0.0.0.0:8080 for that.
+// write 0.0.0.0:8080 for that. Known limit: a bare name with two or more
+// colons and no "/" (e.g. "a:b:c.sock") is taken for an unbracketed IPv6
+// address and rejected; write "./a:b:c.sock".
 func parseListen(b BridgeConfig) (network, addr string) {
 	if b.Mode == "udp" {
 		return "udp", b.Listen
 	}
-	if !filepath.IsAbs(b.Listen) && !strings.HasPrefix(b.Listen, "[") && strings.Count(b.Listen, ":") >= 2 {
+	if !strings.Contains(b.Listen, "/") && !strings.HasPrefix(b.Listen, "[") && strings.Count(b.Listen, ":") >= 2 {
 		// Unbracketed IPv6 + port (::1:8080): SplitHostPort can't parse it
 		// and it's not a credible socket filename, so claim it as TCP and
 		// let validateBridgeFields reject it with a useful message rather
@@ -361,11 +364,6 @@ func parseListen(b BridgeConfig) (network, addr string) {
 		}
 	}
 	return "unix", b.Listen
-}
-
-func listenNetwork(b BridgeConfig) string {
-	n, _ := parseListen(b)
-	return n
 }
 
 // listenKey identifies what a bridge binds for duplicate detection. TCP and
