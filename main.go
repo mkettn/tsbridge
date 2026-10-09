@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -121,7 +122,7 @@ func run() error {
 
 	log.Printf("running %d/%d bridge(s):", started, attempted)
 	for _, b := range manager.List() {
-		log.Printf("  - %s [%s/%s]: %s -> %s", b.Name, b.Mode, b.Source, b.Listen, b.Target)
+		log.Printf("  - %s [%s/%s]: %s -> %s", b.Name, b.Mode, b.Source, b.Listen, strings.Join(b.Target, ", "))
 	}
 
 	// Only fatal if bridges were actually attempted and none survived --

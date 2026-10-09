@@ -74,9 +74,17 @@ type healthSnapshot struct {
 // an active health check: tsbridge only learns about Target's
 // reachability when something actually tries to use the bridge, so a
 // bridge with no traffic shows no failures whether or not Target is
-// actually up.
+// actually up. With several targets each is tracked separately and the
+// worst one is reported.
 type dialHealth struct {
-	mu          sync.Mutex
+	mu      sync.Mutex
+	targets map[string]*targetHealth // keyed by dialed address
+}
+
+// targetHealth is one target's own dial history. Health is tracked per
+// target so a dead target isn't masked by successful dials to the others
+// in a round-robin set.
+type targetHealth struct {
 	consecutive int
 	lastErr     error
 	lastAttempt time.Time
@@ -87,29 +95,53 @@ type dialHealth struct {
 func (h *dialHealth) wrap(dial dialFunc) dialFunc {
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
 		conn, err := dial(ctx, network, address)
-		h.record(err)
+		h.record(address, err)
 		return conn, err
 	}
 }
 
-func (h *dialHealth) record(err error) {
+func (h *dialHealth) record(address string, err error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.lastAttempt = time.Now()
-	h.lastErr = err
+	if h.targets == nil {
+		h.targets = map[string]*targetHealth{}
+	}
+	t := h.targets[address]
+	if t == nil {
+		t = &targetHealth{}
+		h.targets[address] = t
+	}
+	t.lastAttempt = time.Now()
+	t.lastErr = err
 	if err != nil {
-		h.consecutive++
+		t.consecutive++
 	} else {
-		h.consecutive = 0
+		t.consecutive = 0
 	}
 }
 
+// snapshot reports the worst target: the one with the most consecutive
+// failures (its error included). With no failing target, it reports the
+// most recent attempt. LastAttempt is the latest across all targets.
 func (h *dialHealth) snapshot() healthSnapshot {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	s := healthSnapshot{ConsecutiveFailures: h.consecutive, LastAttempt: h.lastAttempt}
-	if h.lastErr != nil {
-		s.LastError = h.lastErr.Error()
+	var s healthSnapshot
+	var worst *targetHealth
+	for _, t := range h.targets {
+		if t.lastAttempt.After(s.LastAttempt) {
+			s.LastAttempt = t.lastAttempt
+		}
+		if worst == nil || t.consecutive > worst.consecutive ||
+			(t.consecutive == worst.consecutive && t.lastAttempt.After(worst.lastAttempt)) {
+			worst = t
+		}
+	}
+	if worst != nil {
+		s.ConsecutiveFailures = worst.consecutive
+		if worst.lastErr != nil {
+			s.LastError = worst.lastErr.Error()
+		}
 	}
 	return s
 }

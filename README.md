@@ -226,7 +226,12 @@ round-robin order:
   until its session expires.
 - There is no failover or health checking: a connection whose target is
   unreachable fails, and the next one tries the next target. Dial health in
-  `GET /bridges` covers all of a bridge's targets together.
+  `GET /bridges` is tracked per target and reports the worst one, so a dead
+  target isn't hidden by successful dials to the others.
+- Selection is per connection/request, with no session affinity: a backend
+  that keeps per-session state behind `mode: http` will break in a way that
+  looks intermittent. Put session-aware routing in front of it, or use a
+  single target.
 - A plain string (`target: host:80`) is still accepted as a single target,
   with a deprecation warning in the log. The management API accepts a string
   for `target` the same way but always returns a list.

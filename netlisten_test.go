@@ -384,3 +384,36 @@ func TestHTTPBridge_RoundRobinTargets(t *testing.T) {
 		t.Errorf("dialed %q", got)
 	}
 }
+
+func TestDialHealth_PerTargetWorstReported(t *testing.T) {
+	h := &dialHealth{}
+	for i := 0; i < 3; i++ {
+		h.record("live:1", nil)
+		h.record("dead:1", errors.New("no route"))
+	}
+	s := h.snapshot()
+	if s.ConsecutiveFailures != 3 || s.LastError != "no route" {
+		t.Errorf("dead target masked by live one: %+v", s)
+	}
+	for i := 0; i < 2; i++ {
+		h.record("dead:1", nil)
+	}
+	if s := h.snapshot(); s.ConsecutiveFailures != 0 || s.LastError != "" {
+		t.Errorf("recovered target still reported: %+v", s)
+	}
+}
+
+func TestTargets_NullAndTrim(t *testing.T) {
+	var b BridgeConfig
+	if err := json.Unmarshal([]byte(`{"target":null}`), &b); err != nil || len(b.Targets) != 0 {
+		t.Errorf("null target: %v %v", err, b.Targets)
+	}
+	b = BridgeConfig{Targets: Targets{" a:1 ", "b:2"}}
+	normalizeBridge(&b)
+	if b.Targets[0] != "a:1" {
+		t.Errorf("not trimmed: %q", b.Targets[0])
+	}
+	if got := newRoundRobin(nil).next(); got != "" {
+		t.Errorf("empty round robin returned %q", got)
+	}
+}

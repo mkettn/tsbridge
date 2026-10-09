@@ -95,7 +95,7 @@ func (t *Targets) UnmarshalYAML(n *yaml.Node) error {
 		if err := n.Decode(&s); err != nil {
 			return err
 		}
-		log.Printf("warning: config line %d: 'target' as a string is deprecated; use a list: target: [%s]", n.Line, s)
+		log.Printf("warning: 'target' as a string is deprecated; use a list: target: [%s]", s)
 		*t = Targets{s}
 		return nil
 	case yaml.SequenceNode:
@@ -110,6 +110,9 @@ func (t *Targets) UnmarshalYAML(n *yaml.Node) error {
 }
 
 func (t *Targets) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		return nil // by convention, null is a no-op
+	}
 	var s string
 	if err := json.Unmarshal(data, &s); err == nil {
 		log.Printf("warning: 'target' given as a string is deprecated; use a list: [%q]", s)
@@ -133,6 +136,9 @@ type roundRobin struct {
 func newRoundRobin(t []string) *roundRobin { return &roundRobin{targets: t} }
 
 func (r *roundRobin) next() string {
+	if len(r.targets) == 0 {
+		return "" // validation rejects this; a dial of "" fails instead of panicking
+	}
 	return r.targets[(r.n.Add(1)-1)%uint64(len(r.targets))]
 }
 
@@ -372,6 +378,9 @@ func normalizeBridge(b *BridgeConfig) {
 	b.Mode = strings.ToLower(strings.TrimSpace(b.Mode))
 	if b.Mode == "" {
 		b.Mode = defaultBridgeMode
+	}
+	for i, t := range b.Targets {
+		b.Targets[i] = strings.TrimSpace(t)
 	}
 	if b.Enabled == nil {
 		enabled := true
