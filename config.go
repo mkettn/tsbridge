@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -330,17 +331,18 @@ func isNetworkListen(b BridgeConfig) bool {
 }
 
 // parseListen says what the bridge binds. mode: udp always listens on a
-// UDP address. Otherwise an absolute path is a Unix socket, and anything
-// else that parses as host:port with a numeric port is a TCP address; what's
-// left (e.g. a relative "run/x.sock") is a Unix socket path resolved against
-// the config directory, so existing configs are unchanged.
+// UDP address. Otherwise listen is a TCP address only when it's host:port
+// with a numeric port and a host tsbridge can actually bind -- an IP
+// literal (127.0.0.1, 0.0.0.0, [::1]) or "localhost". Everything else is a
+// Unix socket path (a relative one resolves against the config directory),
+// including names that merely contain a colon, like "svc.socket:80".
 func parseListen(b BridgeConfig) (network, addr string) {
 	if b.Mode == "udp" {
 		return "udp", b.Listen
 	}
-	if !filepath.IsAbs(b.Listen) {
-		if _, port, err := net.SplitHostPort(b.Listen); err == nil {
-			if _, err := strconv.ParseUint(port, 10, 16); err == nil {
+	if host, port, err := net.SplitHostPort(b.Listen); err == nil {
+		if _, err := strconv.ParseUint(port, 10, 16); err == nil {
+			if _, err := netip.ParseAddr(host); err == nil || host == "localhost" {
 				return "tcp", b.Listen
 			}
 		}

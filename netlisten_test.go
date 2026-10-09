@@ -177,8 +177,12 @@ func TestParseListen(t *testing.T) {
 		{"[::1]:8080", "tcp", "tcp"},
 		{"127.0.0.1:5353", "udp", "udp"},
 		{"/run/x.sock", "tcp", "unix"},
+		{"0.0.0.0:8080", "tcp", "tcp"},
+		{"localhost:8080", "http", "tcp"},
 		{"/run/x:80", "tcp", "unix"},
-		{"svc:80", "tcp", "tcp"},
+		{"svc.socket:80", "tcp", "unix"},
+		{"./SVC.socket:80", "tcp", "unix"},
+		{":8080", "tcp", "unix"},
 		{"x.sock", "http", "unix"},
 	}
 	for _, tc := range tests {
@@ -201,7 +205,6 @@ func TestValidateBridgeFields_NetworkListen(t *testing.T) {
 		{"http on port ok", func(b *BridgeConfig) { b.Listen = "127.0.0.1:8080"; b.Mode = "http" }, ""},
 		{"udp no port", func(b *BridgeConfig) { b.Listen = "127.0.0.1"; b.Mode = "udp" }, "must be host:port"},
 		{"udp path", func(b *BridgeConfig) { b.Listen = "/run/x.sock"; b.Mode = "udp" }, "must be host:port"},
-		{"tcp no host", func(b *BridgeConfig) { b.Listen = ":8080" }, "must be host:port"},
 		{"udp zero port", func(b *BridgeConfig) { b.Listen = "127.0.0.1:0"; b.Mode = "udp" }, "invalid port"},
 		{"socket_mode on tcp", func(b *BridgeConfig) { b.Listen = "127.0.0.1:80"; b.SocketMode = "0660" }, "only apply to a Unix socket"},
 		{"socket_group on udp", func(b *BridgeConfig) { b.Listen = "127.0.0.1:53"; b.Mode = "udp"; b.SocketGroup = "x" }, "only apply to a Unix socket"},
