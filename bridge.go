@@ -55,14 +55,19 @@ type healthReporter interface {
 // healthSnapshot is a point-in-time read of dialHealth, safe to use
 // without further locking.
 type healthSnapshot struct {
-	// ConsecutiveFailures counts dial attempts since the last success (0
-	// if the most recent dial succeeded, or none has happened yet).
+	// All three describe one target: the worst one (most consecutive
+	// failures; on a tie, the most recently attempted). With a single
+	// target that is simply the bridge's dial history.
+	//
+	// ConsecutiveFailures counts that target's dial attempts since its
+	// last success (0 if its most recent dial succeeded, or none has
+	// happened yet).
 	ConsecutiveFailures int
-	// LastError is the most recent dial error, or "" if the most recent
-	// dial succeeded or none has happened yet.
+	// LastError is that target's most recent dial error, or "" if its
+	// most recent dial succeeded or none has happened yet.
 	LastError string
-	// LastAttempt is when the most recent dial happened, or the zero
-	// Time if none has.
+	// LastAttempt is when that target was last dialed, or the zero Time
+	// if no dial has happened.
 	LastAttempt time.Time
 }
 
@@ -122,22 +127,20 @@ func (h *dialHealth) record(address string, err error) {
 
 // snapshot reports the worst target: the one with the most consecutive
 // failures (its error included). With no failing target, it reports the
-// most recent attempt. LastAttempt is the latest across all targets.
+// most recent attempt. All three fields come from that one target.
 func (h *dialHealth) snapshot() healthSnapshot {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	var s healthSnapshot
 	var worst *targetHealth
 	for _, t := range h.targets {
-		if t.lastAttempt.After(s.LastAttempt) {
-			s.LastAttempt = t.lastAttempt
-		}
 		if worst == nil || t.consecutive > worst.consecutive ||
 			(t.consecutive == worst.consecutive && t.lastAttempt.After(worst.lastAttempt)) {
 			worst = t
 		}
 	}
 	if worst != nil {
+		s.LastAttempt = worst.lastAttempt
 		s.ConsecutiveFailures = worst.consecutive
 		if worst.lastErr != nil {
 			s.LastError = worst.lastErr.Error()

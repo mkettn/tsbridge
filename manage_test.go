@@ -614,7 +614,7 @@ func TestStartManagementServer_ServesOverUnixSocket(t *testing.T) {
 }
 
 func TestLoadManagedBridges_MissingFileReturnsNil(t *testing.T) {
-	bridges, err := loadManagedBridges(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
+	bridges, _, err := loadManagedBridges(filepath.Join(t.TempDir(), "does-not-exist.yaml"))
 	if err != nil {
 		t.Fatalf("loadManagedBridges: %v", err)
 	}
@@ -1131,5 +1131,28 @@ func TestManagementHandler_StatusError(t *testing.T) {
 	m.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/status", nil))
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("want 500 when the status fetch fails, got %d: %s", rec.Code, rec.Body)
+	}
+}
+
+func TestStartAll_RewritesLegacyStringTargets(t *testing.T) {
+	dir := t.TempDir()
+	statePath := filepath.Join(dir, managedBridgesFileName)
+	legacy := "bridges:\n  - name: old\n    listen: " + filepath.Join(dir, "old.sock") + "\n    target: oldhost:80\n    mode: tcp\n"
+	if err := os.WriteFile(statePath, []byte(legacy), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, legacyFlag, err := loadManagedBridges(statePath); err != nil || !legacyFlag {
+		t.Fatalf("legacy not detected: %v %v", legacyFlag, err)
+	}
+	m, _ := newTestManagerWithState(t, statePath)
+	if _, _, err := m.startAll(nil); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(statePath)
+	if !strings.Contains(string(data), "- oldhost:80") {
+		t.Errorf("state file not rewritten as a list:\n%s", data)
+	}
+	if _, legacyFlag, _ := loadManagedBridges(statePath); legacyFlag {
+		t.Error("still legacy after rewrite")
 	}
 }

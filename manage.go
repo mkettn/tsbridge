@@ -205,7 +205,7 @@ func (m *bridgeManager) startAll(staticBridges []BridgeConfig) (started, attempt
 		return 0, 0, err
 	}
 
-	managed, err := loadManagedBridges(m.statePath)
+	managed, legacy, err := loadManagedBridges(m.statePath)
 	if err != nil {
 		return 0, 0, fmt.Errorf("loading %s: %w", m.statePath, err)
 	}
@@ -227,6 +227,7 @@ func (m *bridgeManager) startAll(staticBridges []BridgeConfig) (started, attempt
 		}
 	}
 
+	kept := 0
 	for _, b := range managed {
 		normalizeBridge(&b)
 		if err := validateBridgeFields(b); err != nil {
@@ -251,12 +252,22 @@ func (m *bridgeManager) startAll(staticBridges []BridgeConfig) (started, attempt
 		}
 		names[b.Name] = true
 		listens[listenKey(b)] = true
+		kept++
 		s, a := m.startLocked(b, "managed")
 		if s {
 			started++
 		}
 		if a {
 			attempted++
+		}
+	}
+	// Rewrite a state file that still has string-form targets, so the
+	// deprecation warning clears itself after one restart. Not if any entry
+	// was skipped above: saveLocked writes only registered entries, so
+	// that would silently delete the skipped ones.
+	if legacy && kept == len(managed) {
+		if err := m.saveLocked(); err != nil {
+			log.Printf("management: failed to rewrite %s with list-form targets: %v", m.statePath, err)
 		}
 	}
 	return started, attempted, nil
@@ -659,24 +670,38 @@ type managedBridgesFile struct {
 // loadManagedBridges reads path's bridges: list, returning (nil, nil) if
 // the file doesn't exist yet (the common case before the first bridge is
 // ever added through the API). An empty path also returns (nil, nil).
-func loadManagedBridges(path string) ([]BridgeConfig, error) {
+// legacy reports whether any entry used the deprecated string form of
+// target:, i.e. the file should be rewritten.
+func loadManagedBridges(path string) (bridges []BridgeConfig, legacy bool, err error) {
 	if path == "" {
-		return nil, nil
+		return nil, false, nil
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil, false, nil
 		}
-		return nil, err
+		return nil, false, err
 	}
 	dec := yaml.NewDecoder(bytes.NewReader(data))
 	dec.KnownFields(true)
 	var f managedBridgesFile
 	if err := dec.Decode(&f); err != nil && !errors.Is(err, io.EOF) {
-		return nil, fmt.Errorf("parsing YAML: %w", err)
+		return nil, false, fmt.Errorf("parsing YAML: %w", err)
 	}
-	return f.Bridges, nil
+	var probe struct {
+		Bridges []struct {
+			Target yaml.Node `yaml:"target"`
+		} `yaml:"bridges"`
+	}
+	if yaml.Unmarshal(data, &probe) == nil {
+		for _, b := range probe.Bridges {
+			if b.Target.Kind == yaml.ScalarNode {
+				legacy = true
+			}
+		}
+	}
+	return f.Bridges, legacy, nil
 }
 
 // atomicWriteFile writes data to path by writing to a temp file in the

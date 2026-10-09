@@ -453,7 +453,11 @@ something's worth looking at:
 - **`dial_failures`/`last_dial_error`/`last_dial_at`** report `target`'s
   reachability as observed by the bridge's own traffic: `dial_failures`
   counts consecutive dial failures since the last success (0 if the most
-  recent dial succeeded, or none has happened yet). tsbridge never
+  recent dial succeeded, or none has happened yet). With several targets
+  these three describe one target, the worst (most consecutive failures),
+  so `dial_failures` can be non-zero even though the bridge's most recent
+  dial, to another target, succeeded; `last_dial_at` is when that worst
+  target was last dialed. tsbridge never
   probes `target` on its own and never acts on this itself — no
   automatic disabling, no retries beyond what `mode: tcp`/`mode: http`
   already do per-connection — it's purely for you or your monitoring to
