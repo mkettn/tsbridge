@@ -177,8 +177,8 @@ func TestParseListen(t *testing.T) {
 		{"[::1]:8080", "tcp", "tcp"},
 		{"127.0.0.1:5353", "udp", "udp"},
 		{"/run/x.sock", "tcp", "unix"},
-		{"run/x:80", "tcp", "unix"},
-		{"./svc:80", "tcp", "unix"},
+		{"/run/x:80", "tcp", "unix"},
+		{"svc:80", "tcp", "tcp"},
 		{"x.sock", "http", "unix"},
 	}
 	for _, tc := range tests {

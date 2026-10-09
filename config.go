@@ -330,15 +330,15 @@ func isNetworkListen(b BridgeConfig) bool {
 }
 
 // parseListen says what the bridge binds. mode: udp always listens on a
-// UDP address. Otherwise listen is a TCP address if it looks like host:port
-// -- no "/" in it and a numeric port -- and a Unix socket path if not, so
-// existing configs are unchanged. (A bare relative path that happens to
-// look like host:port, e.g. "svc:80", must be written "./svc:80".)
+// UDP address. Otherwise an absolute path is a Unix socket, and anything
+// else that parses as host:port with a numeric port is a TCP address; what's
+// left (e.g. a relative "run/x.sock") is a Unix socket path resolved against
+// the config directory, so existing configs are unchanged.
 func parseListen(b BridgeConfig) (network, addr string) {
 	if b.Mode == "udp" {
 		return "udp", b.Listen
 	}
-	if !strings.Contains(b.Listen, "/") {
+	if !filepath.IsAbs(b.Listen) {
 		if _, port, err := net.SplitHostPort(b.Listen); err == nil {
 			if _, err := strconv.ParseUint(port, 10, 16); err == nil {
 				return "tcp", b.Listen

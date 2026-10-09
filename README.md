@@ -222,10 +222,10 @@ so clients that can't use a Unix socket still reach the tailnet target:
   target: remote-machine:53
 ```
 
-- With `mode: udp`, `listen` must be `host:port`. With `tcp`/`http`, a
-  `listen` with no `/` and a numeric port (`host:port`, `[::1]:8080`) is a
-  TCP address; anything else is a Unix socket path. A relative socket path
-  that looks like `host:port` (e.g. `svc:80`) must be written `./svc:80`.
+- With `mode: udp`, `listen` must be `host:port`. With `tcp`/`http`, an
+  absolute path is a Unix socket; any other `listen` that is `host:port`
+  with a numeric port (`127.0.0.1:8080`, `[::1]:8080`) is a TCP address.
+  What's left (e.g. a relative `run/x.sock`) is a socket path as before.
 - A `udp` bridge gives each client address its own tailnet-side UDP flow,
   dropped after 60 s without traffic; at most 1024 clients at once (excess
   datagrams are dropped, as UDP allows).
