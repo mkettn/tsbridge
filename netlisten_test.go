@@ -46,7 +46,7 @@ func TestStartBridge_TCPListenForwards(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	addr := freeTCPAddr(t)
-	b := BridgeConfig{Name: "tcp-listen", Listen: "tcp://" + addr, Target: "example.invalid:1", Mode: "tcp"}
+	b := BridgeConfig{Name: "tcp-listen", Listen: addr, Target: "example.invalid:1", Mode: "tcp"}
 	rb, err := startBridge(ctx, dialToAddr(backend.Addr().String()), b, 0660, "", make(chan error, 1))
 	if err != nil {
 		t.Fatal(err)
@@ -94,7 +94,7 @@ func TestStartBridge_UDPListenForwardsPerClient(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	addr := freeUDPAddr(t)
-	b := BridgeConfig{Name: "udp-listen", Listen: "udp://" + addr, Target: "example.invalid:1", Mode: "tcp"}
+	b := BridgeConfig{Name: "udp-listen", Listen: addr, Target: "example.invalid:1", Mode: "udp"}
 	rb, err := startBridge(ctx, dial, b, 0660, "", make(chan error, 1))
 	if err != nil {
 		t.Fatal(err)
@@ -168,6 +168,27 @@ func TestUDPBridge_IdleSessionExpires(t *testing.T) {
 	t.Fatal("idle udp session was never reaped")
 }
 
+func TestParseListen(t *testing.T) {
+	tests := []struct {
+		listen, mode, network string
+	}{
+		{"127.0.0.1:8080", "tcp", "tcp"},
+		{"127.0.0.1:8080", "http", "tcp"},
+		{"[::1]:8080", "tcp", "tcp"},
+		{"127.0.0.1:5353", "udp", "udp"},
+		{"/run/x.sock", "tcp", "unix"},
+		{"run/x:80", "tcp", "unix"},
+		{"./svc:80", "tcp", "unix"},
+		{"x.sock", "http", "unix"},
+	}
+	for _, tc := range tests {
+		got, _ := parseListen(BridgeConfig{Listen: tc.listen, Mode: tc.mode})
+		if got != tc.network {
+			t.Errorf("parseListen(%q, %s) = %s; want %s", tc.listen, tc.mode, got, tc.network)
+		}
+	}
+}
+
 func TestValidateBridgeFields_NetworkListen(t *testing.T) {
 	ok := BridgeConfig{Name: "n", Target: "t:1", Mode: "tcp"}
 	tests := []struct {
@@ -175,15 +196,16 @@ func TestValidateBridgeFields_NetworkListen(t *testing.T) {
 		mutate  func(*BridgeConfig)
 		wantErr string // "" = valid
 	}{
-		{"tcp ok", func(b *BridgeConfig) { b.Listen = "tcp://127.0.0.1:8080" }, ""},
-		{"udp ok", func(b *BridgeConfig) { b.Listen = "udp://127.0.0.1:5353" }, ""},
-		{"tcp http ok", func(b *BridgeConfig) { b.Listen = "tcp://127.0.0.1:8080"; b.Mode = "http" }, ""},
-		{"no port", func(b *BridgeConfig) { b.Listen = "tcp://127.0.0.1" }, "must be tcp://host:port"},
-		{"no host", func(b *BridgeConfig) { b.Listen = "udp://:53" }, "must be udp://host:port"},
-		{"bad port", func(b *BridgeConfig) { b.Listen = "tcp://127.0.0.1:99999" }, "invalid port"},
-		{"udp http", func(b *BridgeConfig) { b.Listen = "udp://127.0.0.1:53"; b.Mode = "http" }, "can't use mode"},
-		{"socket_mode on tcp", func(b *BridgeConfig) { b.Listen = "tcp://127.0.0.1:80"; b.SocketMode = "0660" }, "only apply to a Unix socket"},
-		{"socket_group on udp", func(b *BridgeConfig) { b.Listen = "udp://127.0.0.1:53"; b.SocketGroup = "x" }, "only apply to a Unix socket"},
+		{"tcp ok", func(b *BridgeConfig) { b.Listen = "127.0.0.1:8080" }, ""},
+		{"udp ok", func(b *BridgeConfig) { b.Listen = "127.0.0.1:5353"; b.Mode = "udp" }, ""},
+		{"http on port ok", func(b *BridgeConfig) { b.Listen = "127.0.0.1:8080"; b.Mode = "http" }, ""},
+		{"udp no port", func(b *BridgeConfig) { b.Listen = "127.0.0.1"; b.Mode = "udp" }, "must be host:port"},
+		{"udp path", func(b *BridgeConfig) { b.Listen = "/run/x.sock"; b.Mode = "udp" }, "must be host:port"},
+		{"tcp no host", func(b *BridgeConfig) { b.Listen = ":8080" }, "must be host:port"},
+		{"udp zero port", func(b *BridgeConfig) { b.Listen = "127.0.0.1:0"; b.Mode = "udp" }, "invalid port"},
+		{"socket_mode on tcp", func(b *BridgeConfig) { b.Listen = "127.0.0.1:80"; b.SocketMode = "0660" }, "only apply to a Unix socket"},
+		{"socket_group on udp", func(b *BridgeConfig) { b.Listen = "127.0.0.1:53"; b.Mode = "udp"; b.SocketGroup = "x" }, "only apply to a Unix socket"},
+		{"rewrite_host on udp", func(b *BridgeConfig) { b.Listen = "127.0.0.1:53"; b.Mode = "udp"; b.RewriteHost = true }, "rewrite_host"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -200,11 +222,5 @@ func TestValidateBridgeFields_NetworkListen(t *testing.T) {
 				t.Fatalf("err = %v; want containing %q", err, tc.wantErr)
 			}
 		})
-	}
-}
-
-func TestIsNetworkListen(t *testing.T) {
-	if !isNetworkListen("tcp://127.0.0.1:1") || isNetworkListen("/run/x.sock") || isNetworkListen("rel.sock") {
-		t.Fatal("isNetworkListen misclassifies")
 	}
 }

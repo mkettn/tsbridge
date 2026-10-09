@@ -33,6 +33,7 @@ const managedBridgesFileName = "managed-bridges.yaml"
 var supportedBridgeModes = map[string]bool{
 	"tcp":  true, // raw bidirectional byte copy
 	"http": true, // terminate HTTP and reverse-proxy to target
+	"udp":  true, // relay datagrams; listen is a UDP bind address (host:port)
 }
 
 // BridgeConfig is one listen-socket -> tailnet-target mapping. It doubles
@@ -41,16 +42,16 @@ var supportedBridgeModes = map[string]bool{
 // list" in the same shape as config.yaml's.
 type BridgeConfig struct {
 	Name string `yaml:"name" json:"name"`
-	// Listen is a Unix socket path, or tcp://host:port / udp://host:port to
-	// accept on a TCP or UDP port instead. Network listeners have no file
-	// permissions to restrict them: prefer a loopback address.
+	// Listen is a Unix socket path, or a host:port to accept on a TCP port
+	// instead (always a UDP port for mode: udp). Network listeners have no
+	// file permissions to restrict them: prefer a loopback address.
 	Listen string `yaml:"listen" json:"listen"`
 	Target string `yaml:"target" json:"target"`
-	// Mode selects how tsbridge handles the connection, not what network
-	// it dials on the tailnet side -- that's always TCP regardless of
-	// Mode. "tcp" (the default if unset) does a raw bidirectional byte
-	// copy; "http" terminates HTTP on the socket and reverse-proxies
-	// each request to Target instead.
+	// Mode selects how tsbridge handles traffic. "tcp" (the default if
+	// unset) does a raw bidirectional byte copy; "http" terminates HTTP and
+	// reverse-proxies each request to Target instead; both dial Target over
+	// TCP. "udp" makes Listen a UDP bind address and relays datagrams to
+	// Target over UDP.
 	Mode string `yaml:"mode" json:"mode"`
 	// RewriteHost only applies to mode: http (rejected on any other
 	// mode). false (the default) forwards the request to Target with
@@ -113,8 +114,10 @@ func LoadConfig(path string) (*Config, error) {
 	baseDir := filepath.Dir(path)
 	bridges := raw.Bridges
 	for i := range bridges {
-		bridges[i].Listen = resolvePath(baseDir, bridges[i].Listen)
 		normalizeBridge(&bridges[i])
+		if !isNetworkListen(bridges[i]) {
+			bridges[i].Listen = resolvePath(baseDir, bridges[i].Listen)
+		}
 	}
 
 	if err := checkBridges(bridges); err != nil {
@@ -197,7 +200,7 @@ func LoadConfig(path string) (*Config, error) {
 // otherwise it's resolved relative to baseDir, the config file's own
 // directory.
 func resolvePath(baseDir, p string) string {
-	if p == "" || filepath.IsAbs(p) || isNetworkListen(p) {
+	if p == "" || filepath.IsAbs(p) {
 		return p
 	}
 	return filepath.Join(baseDir, p)
@@ -233,21 +236,18 @@ func validateBridgeFields(b BridgeConfig) error {
 		return fmt.Errorf("bridge %q is missing required field 'target'", b.Name)
 	}
 	if !supportedBridgeModes[b.Mode] {
-		return fmt.Errorf("bridge %q has unsupported mode %q; supported modes are tcp, http", b.Name, b.Mode)
+		return fmt.Errorf("bridge %q has unsupported mode %q; supported modes are tcp, http, udp", b.Name, b.Mode)
 	}
-	if network, addr := parseListen(b.Listen); network != "unix" {
+	if network, addr := parseListen(b); network != "unix" {
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil || host == "" || port == "" {
-			return fmt.Errorf("bridge %q: listen %q must be %s://host:port (e.g. %s://127.0.0.1:8080)", b.Name, b.Listen, network, network)
+			return fmt.Errorf("bridge %q: listen %q must be host:port (e.g. 127.0.0.1:8080)", b.Name, b.Listen)
 		}
 		if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
 			return fmt.Errorf("bridge %q: listen %q has an invalid port", b.Name, b.Listen)
 		}
 		if b.SocketGroup != "" || b.SocketMode != "" {
 			return fmt.Errorf("bridge %q sets socket_group/socket_mode, but those only apply to a Unix socket listen (bridge listens on %s)", b.Name, network)
-		}
-		if network == "udp" && b.Mode != "tcp" {
-			return fmt.Errorf("bridge %q: a udp:// listen relays datagrams and can't use mode: %s", b.Name, b.Mode)
 		}
 	}
 	if b.RewriteHost && b.Mode != "http" {
@@ -322,23 +322,30 @@ func validateControlURL(raw string) error {
 	return nil
 }
 
-// isNetworkListen reports whether a listen value is a tcp:// or udp://
-// address rather than a Unix socket path.
-func isNetworkListen(listen string) bool {
-	network, _ := parseListen(listen)
+// isNetworkListen reports whether the bridge binds a TCP/UDP address
+// rather than a Unix socket path.
+func isNetworkListen(b BridgeConfig) bool {
+	network, _ := parseListen(b)
 	return network != "unix"
 }
 
-// parseListen splits a bridge's listen value into the network to bind and
-// its address. "tcp://host:port" and "udp://host:port" bind that network;
-// anything else is a Unix socket path, so existing configs are unchanged.
-func parseListen(listen string) (network, addr string) {
-	for _, n := range []string{"tcp", "udp"} {
-		if rest, ok := strings.CutPrefix(listen, n+"://"); ok {
-			return n, rest
+// parseListen says what the bridge binds. mode: udp always listens on a
+// UDP address. Otherwise listen is a TCP address if it looks like host:port
+// -- no "/" in it and a numeric port -- and a Unix socket path if not, so
+// existing configs are unchanged. (A bare relative path that happens to
+// look like host:port, e.g. "svc:80", must be written "./svc:80".)
+func parseListen(b BridgeConfig) (network, addr string) {
+	if b.Mode == "udp" {
+		return "udp", b.Listen
+	}
+	if !strings.Contains(b.Listen, "/") {
+		if _, port, err := net.SplitHostPort(b.Listen); err == nil {
+			if _, err := strconv.ParseUint(port, 10, 16); err == nil {
+				return "tcp", b.Listen
+			}
 		}
 	}
-	return "unix", listen
+	return "unix", b.Listen
 }
 
 func parseSocketMode(s string) (os.FileMode, error) {

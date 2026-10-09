@@ -129,7 +129,7 @@ func startBridge(ctx context.Context, dial dialFunc, b BridgeConfig, sockMode os
 		return nil, err
 	}
 
-	network, addr := parseListen(b.Listen)
+	network, addr := parseListen(b)
 	switch network {
 	case "udp":
 		return startUDPBridge(ctx, dial, b, addr, fatal)
