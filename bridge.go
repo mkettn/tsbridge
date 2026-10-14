@@ -9,7 +9,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
-	"net/url"
 	"os"
 	"os/user"
 	"strconv"
@@ -56,14 +55,19 @@ type healthReporter interface {
 // healthSnapshot is a point-in-time read of dialHealth, safe to use
 // without further locking.
 type healthSnapshot struct {
-	// ConsecutiveFailures counts dial attempts since the last success (0
-	// if the most recent dial succeeded, or none has happened yet).
+	// All three describe one target: the worst one (most consecutive
+	// failures; on a tie, the most recently attempted). With a single
+	// target that is simply the bridge's dial history.
+	//
+	// ConsecutiveFailures counts that target's dial attempts since its
+	// last success (0 if its most recent dial succeeded, or none has
+	// happened yet).
 	ConsecutiveFailures int
-	// LastError is the most recent dial error, or "" if the most recent
-	// dial succeeded or none has happened yet.
+	// LastError is that target's most recent dial error, or "" if its
+	// most recent dial succeeded or none has happened yet.
 	LastError string
-	// LastAttempt is when the most recent dial happened, or the zero
-	// Time if none has.
+	// LastAttempt is when that target was last dialed, or the zero Time
+	// if no dial has happened.
 	LastAttempt time.Time
 }
 
@@ -75,9 +79,17 @@ type healthSnapshot struct {
 // an active health check: tsbridge only learns about Target's
 // reachability when something actually tries to use the bridge, so a
 // bridge with no traffic shows no failures whether or not Target is
-// actually up.
+// actually up. With several targets each is tracked separately and the
+// worst one is reported.
 type dialHealth struct {
-	mu          sync.Mutex
+	mu      sync.Mutex
+	targets map[string]*targetHealth // keyed by dialed address
+}
+
+// targetHealth is one target's own dial history. Health is tracked per
+// target so a dead target isn't masked by successful dials to the others
+// in a round-robin set.
+type targetHealth struct {
 	consecutive int
 	lastErr     error
 	lastAttempt time.Time
@@ -88,29 +100,51 @@ type dialHealth struct {
 func (h *dialHealth) wrap(dial dialFunc) dialFunc {
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
 		conn, err := dial(ctx, network, address)
-		h.record(err)
+		h.record(address, err)
 		return conn, err
 	}
 }
 
-func (h *dialHealth) record(err error) {
+func (h *dialHealth) record(address string, err error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.lastAttempt = time.Now()
-	h.lastErr = err
+	if h.targets == nil {
+		h.targets = map[string]*targetHealth{}
+	}
+	t := h.targets[address]
+	if t == nil {
+		t = &targetHealth{}
+		h.targets[address] = t
+	}
+	t.lastAttempt = time.Now()
+	t.lastErr = err
 	if err != nil {
-		h.consecutive++
+		t.consecutive++
 	} else {
-		h.consecutive = 0
+		t.consecutive = 0
 	}
 }
 
+// snapshot reports the worst target: the one with the most consecutive
+// failures (its error included). With no failing target, it reports the
+// most recent attempt. All three fields come from that one target.
 func (h *dialHealth) snapshot() healthSnapshot {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	s := healthSnapshot{ConsecutiveFailures: h.consecutive, LastAttempt: h.lastAttempt}
-	if h.lastErr != nil {
-		s.LastError = h.lastErr.Error()
+	var s healthSnapshot
+	var worst *targetHealth
+	for _, t := range h.targets {
+		if worst == nil || t.consecutive > worst.consecutive ||
+			(t.consecutive == worst.consecutive && t.lastAttempt.After(worst.lastAttempt)) {
+			worst = t
+		}
+	}
+	if worst != nil {
+		s.LastAttempt = worst.lastAttempt
+		s.ConsecutiveFailures = worst.consecutive
+		if worst.lastErr != nil {
+			s.LastError = worst.lastErr.Error()
+		}
 	}
 	return s
 }
@@ -347,6 +381,7 @@ func (t *tcpBridge) dialHealth() healthSnapshot { return t.health.snapshot() }
 // keep the socket bound-but-dead with clients hanging in the backlog.
 func acceptLoop(ctx context.Context, dial dialFunc, b BridgeConfig, l net.Listener, wg *sync.WaitGroup, fatal chan<- error) {
 	backoff := acceptBackoffMin
+	rr := newRoundRobin(b.Targets)
 	for {
 		conn, err := l.Accept()
 		if err != nil {
@@ -370,10 +405,11 @@ func acceptLoop(ctx context.Context, dial dialFunc, b BridgeConfig, l net.Listen
 			return
 		}
 		backoff = acceptBackoffMin
+		target := rr.next()
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			handleConn(ctx, dial, b, conn)
+			handleConn(ctx, dial, b, target, conn)
 		}()
 	}
 }
@@ -384,18 +420,18 @@ func isTemporaryAcceptError(err error) bool {
 
 var connCounter uint64
 
-func handleConn(ctx context.Context, dial dialFunc, b BridgeConfig, local net.Conn) {
+func handleConn(ctx context.Context, dial dialFunc, b BridgeConfig, target string, local net.Conn) {
 	defer local.Close()
 	id := atomic.AddUint64(&connCounter, 1)
 
-	remote, err := dial(ctx, "tcp", b.Target)
+	remote, err := dial(ctx, "tcp", target)
 	if err != nil {
-		log.Printf("bridge %s: conn %d: dial %s failed: %v", b.Name, id, b.Target, err)
+		log.Printf("bridge %s: conn %d: dial %s failed: %v", b.Name, id, target, err)
 		return
 	}
 	defer remote.Close()
 
-	log.Printf("bridge %s: conn %d: opened (%s -> %s)", b.Name, id, b.Listen, b.Target)
+	log.Printf("bridge %s: conn %d: opened (%s -> %s)", b.Name, id, b.Listen, target)
 
 	var copyWG sync.WaitGroup
 	copyWG.Add(2)
@@ -440,22 +476,22 @@ func startHTTPBridge(ctx context.Context, dial dialFunc, b BridgeConfig, l net.L
 	ctx, cancel := context.WithCancel(ctx)
 	health := &dialHealth{}
 	dial = health.wrap(dial)
-	targetURL := &url.URL{Scheme: "http", Host: b.Target}
-	proxy := httputil.NewSingleHostReverseProxy(targetURL)
-	// NewSingleHostReverseProxy's default Director rewrites r.URL.Host
-	// (what gets dialed) but leaves r.Host -- the actual Host header
-	// sent on the wire -- as whatever arrived on the incoming request.
-	// That's the default here too (b.RewriteHost false): most backends
-	// don't care what Host they're addressed as. A virtual-host-style
-	// one does (tailscale serve, for one: it keys routes by the target
-	// node's own hostname, and 404s on anything else) -- rewrite_host:
-	// true forces r.Host to target's host so a backend like that
-	// recognizes the request as its own.
-	if b.RewriteHost {
-		defaultDirector := proxy.Director
-		proxy.Director = func(r *http.Request) {
-			defaultDirector(r)
-			r.Host = targetURL.Host
+	rr := newRoundRobin(b.Targets)
+	proxy := &httputil.ReverseProxy{}
+	// The Director picks the next target per request. It only sets what
+	// gets dialed (r.URL.Host); r.Host -- the Host header sent on the
+	// wire -- stays whatever the client sent, which is the default here
+	// (b.RewriteHost false): most backends don't care what Host they're
+	// addressed as. A virtual-host-style one does (tailscale serve, for
+	// one: it keys routes by the target node's own hostname, and 404s on
+	// anything else) -- rewrite_host: true forces r.Host to the chosen
+	// target's host so a backend like that recognizes the request.
+	proxy.Director = func(r *http.Request) {
+		target := rr.next()
+		r.URL.Scheme = "http"
+		r.URL.Host = target
+		if b.RewriteHost {
+			r.Host = target
 		}
 	}
 	proxy.Transport = &http.Transport{
@@ -464,11 +500,11 @@ func startHTTPBridge(ctx context.Context, dial dialFunc, b BridgeConfig, l net.L
 		},
 	}
 	proxy.ModifyResponse = func(resp *http.Response) error {
-		log.Printf("bridge %s: %s %s -> %s: %d", b.Name, resp.Request.Method, resp.Request.URL.RequestURI(), b.Target, resp.StatusCode)
+		log.Printf("bridge %s: %s %s -> %s: %d", b.Name, resp.Request.Method, resp.Request.URL.RequestURI(), resp.Request.URL.Host, resp.StatusCode)
 		return nil
 	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
-		log.Printf("bridge %s: %s %s -> %s: %v", b.Name, r.Method, r.URL.RequestURI(), b.Target, err)
+		log.Printf("bridge %s: %s %s -> %s: %v", b.Name, r.Method, r.URL.RequestURI(), r.URL.Host, err)
 		w.WriteHeader(http.StatusBadGateway)
 	}
 

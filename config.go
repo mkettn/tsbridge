@@ -1,9 +1,11 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/netip"
 	"net/url"
@@ -11,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"gopkg.in/yaml.v3"
 )
@@ -47,7 +50,10 @@ type BridgeConfig struct {
 	// instead (always a UDP port for mode: udp). Network listeners have no
 	// file permissions to restrict them: prefer a loopback address.
 	Listen string `yaml:"listen" json:"listen"`
-	Target string `yaml:"target" json:"target"`
+	// Targets is one or more host:port tailnet targets, chosen round-robin
+	// per connection (per client for mode: udp, per request for mode: http).
+	// A plain string is still accepted as a single target, with a warning.
+	Targets Targets `yaml:"target" json:"target"`
 	// Mode selects how tsbridge handles traffic. "tcp" (the default if
 	// unset) does a raw bidirectional byte copy; "http" terminates HTTP and
 	// reverse-proxies each request to Target instead; both dial Target over
@@ -74,6 +80,66 @@ type BridgeConfig struct {
 	// global value"; each is independent of the other.
 	SocketGroup string `yaml:"socket_group,omitempty" json:"socket_group,omitempty"`
 	SocketMode  string `yaml:"socket_mode,omitempty" json:"socket_mode,omitempty"`
+}
+
+// Targets is a bridge's list of tailnet targets. In YAML and JSON it is
+// normally a list, but a bare string is accepted as a one-element list
+// (with a logged warning) for configs written before multiple targets
+// existed. It is always written back out as a list.
+type Targets []string
+
+func (t *Targets) UnmarshalYAML(n *yaml.Node) error {
+	switch n.Kind {
+	case yaml.ScalarNode:
+		var s string
+		if err := n.Decode(&s); err != nil {
+			return err
+		}
+		log.Printf("warning: 'target' as a string is deprecated; use a list: target: [%s]", s)
+		*t = Targets{s}
+		return nil
+	case yaml.SequenceNode:
+		var l []string
+		if err := n.Decode(&l); err != nil {
+			return err
+		}
+		*t = l
+		return nil
+	}
+	return fmt.Errorf("line %d: 'target' must be a list of host:port strings", n.Line)
+}
+
+func (t *Targets) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		return nil // by convention, null is a no-op
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		log.Printf("warning: 'target' given as a string is deprecated; use a list: [%q]", s)
+		*t = Targets{s}
+		return nil
+	}
+	var l []string
+	if err := json.Unmarshal(data, &l); err != nil {
+		return fmt.Errorf("'target' must be a list of host:port strings")
+	}
+	*t = l
+	return nil
+}
+
+// roundRobin hands out targets in order, safe for concurrent use.
+type roundRobin struct {
+	targets []string
+	n       atomic.Uint64
+}
+
+func newRoundRobin(t []string) *roundRobin { return &roundRobin{targets: t} }
+
+func (r *roundRobin) next() string {
+	if len(r.targets) == 0 {
+		return "" // validation rejects this; a dial of "" fails instead of panicking
+	}
+	return r.targets[(r.n.Add(1)-1)%uint64(len(r.targets))]
 }
 
 // Config is the fully resolved, validated configuration used at runtime.
@@ -233,8 +299,13 @@ func validateBridgeFields(b BridgeConfig) error {
 	if b.Listen == "" {
 		return fmt.Errorf("bridge %q is missing required field 'listen'", b.Name)
 	}
-	if b.Target == "" {
+	if len(b.Targets) == 0 {
 		return fmt.Errorf("bridge %q is missing required field 'target'", b.Name)
+	}
+	for _, t := range b.Targets {
+		if strings.TrimSpace(t) == "" {
+			return fmt.Errorf("bridge %q has an empty entry in 'target'", b.Name)
+		}
 	}
 	if !supportedBridgeModes[b.Mode] {
 		return fmt.Errorf("bridge %q has unsupported mode %q; supported modes are tcp, http, udp", b.Name, b.Mode)
@@ -307,6 +378,9 @@ func normalizeBridge(b *BridgeConfig) {
 	b.Mode = strings.ToLower(strings.TrimSpace(b.Mode))
 	if b.Mode == "" {
 		b.Mode = defaultBridgeMode
+	}
+	for i, t := range b.Targets {
+		b.Targets[i] = strings.TrimSpace(t)
 	}
 	if b.Enabled == nil {
 		enabled := true

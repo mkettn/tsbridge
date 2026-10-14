@@ -43,4 +43,4 @@ bridges:
     # Replace with a real host:port on your tailnet -- any plain HTTP
     # service works, since tsbridge just proxies raw TCP bytes and
     # doesn't care what's inside them.
-    target: example-host:80
+    target: [example-host:80]

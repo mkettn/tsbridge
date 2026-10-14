@@ -26,7 +26,7 @@ const (
 // "udp"), which is how replies find their way back to the right client.
 type udpBridge struct {
 	name   string
-	target string
+	rr     *roundRobin // target is picked once per client session
 	pc     net.PacketConn
 	dial   dialFunc
 	ctx    context.Context
@@ -41,6 +41,7 @@ type udpBridge struct {
 
 type udpSession struct {
 	remote net.Conn
+	target string
 	last   time.Time // guarded by udpBridge.mu
 	// writeFailed is only touched by pump; it limits the reply-write
 	// failure log to one line per session.
@@ -57,7 +58,7 @@ func startUDPBridge(ctx context.Context, dial dialFunc, b BridgeConfig, addr str
 	ctx, cancel := context.WithCancel(ctx)
 	health := &dialHealth{}
 	u := &udpBridge{
-		name: b.Name, target: b.Target, pc: pc, dial: health.wrap(dial),
+		name: b.Name, rr: newRoundRobin(b.Targets), pc: pc, dial: health.wrap(dial),
 		ctx: ctx, cancel: cancel, health: health, idle: idle,
 		sessions: map[string]*udpSession{},
 	}
@@ -90,7 +91,7 @@ func (u *udpBridge) readLoop(fatal chan<- error) {
 			continue
 		}
 		if _, err := s.remote.Write(buf[:n]); err != nil {
-			log.Printf("bridge %s: udp write to %s failed: %v", u.name, u.target, err)
+			log.Printf("bridge %s: udp write to %s failed: %v", u.name, s.target, err)
 		}
 	}
 }
@@ -117,12 +118,13 @@ func (u *udpBridge) session(client net.Addr) *udpSession {
 		return nil
 	}
 
-	remote, err := u.dial(u.ctx, "udp", u.target)
+	target := u.rr.next()
+	remote, err := u.dial(u.ctx, "udp", target)
 	if err != nil {
-		log.Printf("bridge %s: udp dial %s failed: %v", u.name, u.target, err)
+		log.Printf("bridge %s: udp dial %s failed: %v", u.name, target, err)
 		return nil
 	}
-	s := &udpSession{remote: remote, last: time.Now()}
+	s := &udpSession{remote: remote, target: target, last: time.Now()}
 	u.mu.Lock()
 	if u.ctx.Err() != nil { // shut down while dialing
 		u.mu.Unlock()
