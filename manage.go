@@ -22,7 +22,6 @@ import (
 	"net/http"
 	"os"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -298,17 +297,18 @@ func (m *bridgeManager) Handler() http.Handler {
 	mux.HandleFunc("GET /status", m.handleStatus)
 	mux.HandleFunc("GET /bridges", m.handleList)
 	mux.HandleFunc("GET /bridges/{name}", m.handleGet)
-	// Everything else is rejected with a JSON error like the rest of the
-	// API, rather than ServeMux's plain-text one.
+	// Anything else on a known path is a method error; anything else at
+	// all is a 404. Both are registered as patterns so the mux itself
+	// decides which path is "known" -- no second copy of the route table --
+	// and both reply with a JSON error like the rest of the API.
+	methodNotAllowed := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Allow", "GET, HEAD")
+		writeError(w, &apiError{http.StatusMethodNotAllowed, "method not allowed"})
+	}
+	mux.HandleFunc("/status", methodNotAllowed)
+	mux.HandleFunc("/bridges", methodNotAllowed)
+	mux.HandleFunc("/bridges/{name}", methodNotAllowed)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		p := r.URL.Path
-		known := p == "/status" || p == "/bridges" ||
-			(strings.HasPrefix(p, "/bridges/") && len(p) > len("/bridges/") && !strings.Contains(p[len("/bridges/"):], "/"))
-		if known {
-			w.Header().Set("Allow", "GET")
-			writeError(w, &apiError{http.StatusMethodNotAllowed, "method not allowed"})
-			return
-		}
 		writeError(w, notFoundErr("not found"))
 	})
 	return mux

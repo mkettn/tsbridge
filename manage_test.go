@@ -203,6 +203,11 @@ func TestManagementHandler_ReadOnly(t *testing.T) {
 			t.Errorf("%s %s: want a JSON error, got Content-Type %q", c[0], c[1], ct)
 		}
 	}
+	// An encoded slash is one path segment to the mux, so this is not a
+	// bridge route: a 404, not a method error.
+	if rec := do("GET", "/bridges%2Fsvc"); rec.Code != http.StatusNotFound {
+		t.Errorf("GET /bridges%%2Fsvc: want 404, got %d", rec.Code)
+	}
 	if len(m.List()) != 1 {
 		t.Error("a rejected mutation changed the bridge list")
 	}
