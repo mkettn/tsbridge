@@ -29,10 +29,6 @@ const defaultManagementSocketMode os.FileMode = 0600
 // defaultBridgeMode is used when a bridge doesn't set mode:.
 const defaultBridgeMode = "tcp"
 
-// managedBridgesFileName is the state_dir file the management API
-// persists its own bridges to -- see manage.go.
-const managedBridgesFileName = "managed-bridges.yaml"
-
 // supportedBridgeModes are the values checkBridges accepts for mode:.
 var supportedBridgeModes = map[string]bool{
 	"tcp":  true, // raw bidirectional byte copy
@@ -218,9 +214,6 @@ func LoadConfig(path string) (*Config, error) {
 			// own default (0660) already grants the group access.
 			return nil, fmt.Errorf("management_socket_group is set but management_socket_mode is not: "+
 				"the default %#o gives the group no access -- set a mode that does, e.g. \"0660\"", defaultManagementSocketMode)
-		}
-		if stateDir == "" {
-			return nil, fmt.Errorf("management_socket requires state_dir to be set -- it's where managed bridges (%s) are persisted", managedBridgesFileName)
 		}
 		for _, b := range bridges {
 			if b.Listen == managementSocket {

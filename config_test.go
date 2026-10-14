@@ -361,16 +361,15 @@ bridges: []
 	}
 }
 
-func TestLoadConfig_ManagementSocketRequiresStateDir(t *testing.T) {
+func TestLoadConfig_ManagementSocketNeedsNoStateDir(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), `
 ephemeral: true
 management_socket: control.sock
 bridges: []
 `)
-	_, err := LoadConfig(filepath.Join(dir, "config.yaml"))
-	if err == nil || !strings.Contains(err.Error(), "state_dir") {
-		t.Fatalf("want error requiring state_dir, got: %v", err)
+	if _, err := LoadConfig(filepath.Join(dir, "config.yaml")); err != nil {
+		t.Fatalf("the read-only management socket should not need state_dir: %v", err)
 	}
 }
 
