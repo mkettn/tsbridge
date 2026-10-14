@@ -107,12 +107,6 @@ func (t *Targets) UnmarshalJSON(data []byte) error {
 	if string(data) == "null" {
 		return nil // by convention, null is a no-op
 	}
-	var s string
-	if err := json.Unmarshal(data, &s); err == nil {
-		log.Printf("warning: 'target' given as a string is deprecated; use a list: [%q]", s)
-		*t = Targets{s}
-		return nil
-	}
 	var l []string
 	if err := json.Unmarshal(data, &l); err != nil {
 		return fmt.Errorf("'target' must be a list of host:port strings")

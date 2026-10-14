@@ -289,7 +289,6 @@ func TestTargets_Unmarshal(t *testing.T) {
 
 	for in, want := range map[string]string{
 		`{"target":["a:1","b:2"]}`: "a:1 b:2",
-		`{"target":"a:1"}`:         "a:1",
 	} {
 		var b BridgeConfig
 		if err := json.Unmarshal([]byte(in), &b); err != nil {
@@ -298,6 +297,9 @@ func TestTargets_Unmarshal(t *testing.T) {
 		if got := strings.Join(b.Targets, " "); got != want {
 			t.Errorf("%s: got %q, want %q", in, got, want)
 		}
+	}
+	if err := json.Unmarshal([]byte(`{"target":"a:1"}`), &BridgeConfig{}); err == nil {
+		t.Error("a JSON string target should be rejected")
 	}
 	out, _ := json.Marshal(BridgeConfig{Targets: Targets{"a:1"}})
 	if !strings.Contains(string(out), `"target":["a:1"]`) {

@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -188,7 +189,9 @@ func (m *bridgeManager) watchFatal(entry *bridgeEntry, fatalCh <-chan error, don
 	select {
 	case err := <-fatalCh:
 		m.mu.Lock()
-		if cur, ok := m.entries[entry.cfg.Name]; ok && cur == entry && entry.fatalDone == done {
+		// cur == entry guards against a stale signal acting on a different
+		// entry registered under the same name.
+		if cur, ok := m.entries[entry.cfg.Name]; ok && cur == entry {
 			entry.rb = nil
 			entry.lastError = err
 			entry.fatalDone = nil
@@ -295,6 +298,19 @@ func (m *bridgeManager) Handler() http.Handler {
 	mux.HandleFunc("GET /status", m.handleStatus)
 	mux.HandleFunc("GET /bridges", m.handleList)
 	mux.HandleFunc("GET /bridges/{name}", m.handleGet)
+	// Everything else is rejected with a JSON error like the rest of the
+	// API, rather than ServeMux's plain-text one.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		known := p == "/status" || p == "/bridges" ||
+			(strings.HasPrefix(p, "/bridges/") && len(p) > len("/bridges/") && !strings.Contains(p[len("/bridges/"):], "/"))
+		if known {
+			w.Header().Set("Allow", "GET")
+			writeError(w, &apiError{http.StatusMethodNotAllowed, "method not allowed"})
+			return
+		}
+		writeError(w, notFoundErr("not found"))
+	})
 	return mux
 }
 

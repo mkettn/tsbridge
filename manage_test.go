@@ -199,6 +199,8 @@ func TestManagementHandler_ReadOnly(t *testing.T) {
 	} {
 		if rec := do(c[0], c[1]); rec.Code != http.StatusMethodNotAllowed && rec.Code != http.StatusNotFound {
 			t.Errorf("%s %s: want 404/405, got %d", c[0], c[1], rec.Code)
+		} else if ct := rec.Header().Get("Content-Type"); ct != "application/json; charset=utf-8" {
+			t.Errorf("%s %s: want a JSON error, got Content-Type %q", c[0], c[1], ct)
 		}
 	}
 	if len(m.List()) != 1 {

@@ -529,7 +529,7 @@ the leaf socket files inside `/run/tsbridge`, which must already exist as
 a directory).
 
 To add, remove, or change a bridge later: edit `/etc/tsbridge/config.yaml`
-and `sudo systemctl restart tsbridge` — A *new*
+and `sudo systemctl restart tsbridge`. A *new*
 `socket_group` value — one `tsbridge` isn't already a member of —
 additionally needs a `tsbridge.service` edit (`SupplementaryGroups=`) and
 `systemctl daemon-reload`, since group membership is a process-level
