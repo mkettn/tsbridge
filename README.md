@@ -193,7 +193,8 @@ Top-level fields in `config.yaml`:
 Each bridge entry:
 
 ```yaml
-- name: my-service          # unique identifier, used in logs and error messages
+- name: my-service          # unique identifier, used in logs and error messages;
+                            # letters, digits, "_", "." and "-" only
   listen: /run/tsbridge/my-service.sock   # Unix socket path to create, or a host:port --
                                           # see "TCP and UDP listeners" below
   target: [remote-machine:1234]           # list of host:port targets reachable over the tailnet --

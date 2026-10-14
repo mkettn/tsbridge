@@ -307,6 +307,22 @@ func TestTargets_Unmarshal(t *testing.T) {
 	}
 }
 
+func TestValidateBridgeFields_Name(t *testing.T) {
+	for name, ok := range map[string]bool{
+		"svc": true, "My_Service-2.v1": true,
+		"": false, "a b": false, "a/b": false, "a%2Fb": false, "a:b": false, "é": false, ".": false, "..": false, "a\n": false,
+	} {
+		b := BridgeConfig{Name: name, Listen: "/x.sock", Targets: Targets{"t:1"}, Mode: "tcp"}
+		err := validateBridgeFields(b)
+		if name != "" && (err == nil) != ok {
+			t.Errorf("name %q: valid=%v, err=%v", name, ok, err)
+		}
+		if name == "" && err == nil {
+			t.Error("empty name should be rejected")
+		}
+	}
+}
+
 func TestValidateBridgeFields_Targets(t *testing.T) {
 	b := BridgeConfig{Name: "n", Listen: "/x.sock", Mode: "tcp"}
 	if err := validateBridgeFields(b); err == nil {

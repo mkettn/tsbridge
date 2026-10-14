@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -277,9 +278,23 @@ func readRawConfig(path string) (*rawConfig, error) {
 // applies. It doesn't know about any other bridge, so duplicate name/listen
 // checks live in checkBridges (the static list) and bridgeManager.Add (a
 // single new bridge against whatever's currently running) instead.
+// bridgeNameRE is the set of characters a bridge name may contain. Names
+// appear in log lines and in the management API's /bridges/{name} URLs, so
+// restricting them means nothing there ever needs escaping.
+var bridgeNameRE = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
+// validBridgeName also rejects "." and "..", which are path segments in a
+// URL rather than names.
+func validBridgeName(name string) bool {
+	return bridgeNameRE.MatchString(name) && strings.Trim(name, ".") != ""
+}
+
 func validateBridgeFields(b BridgeConfig) error {
 	if b.Name == "" {
 		return fmt.Errorf("a bridge is missing required field 'name'")
+	}
+	if !validBridgeName(b.Name) {
+		return fmt.Errorf("bridge name %q is invalid: use only letters, digits, '_', '.' and '-' (and not just dots)", b.Name)
 	}
 	if b.Listen == "" {
 		return fmt.Errorf("bridge %q is missing required field 'listen'", b.Name)
