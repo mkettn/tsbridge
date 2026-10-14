@@ -449,11 +449,6 @@ lists active problems tailscaled itself has detected (an expired key,
 DNS misconfiguration, etc.); empty means none known, not necessarily
 that everything is fine.
 
-**Upgrading:** earlier versions let the API add, remove, enable and
-disable bridges and persisted them to `state_dir/managed-bridges.yaml`.
-That file is no longer read (tsbridge logs a warning if it exists); move
-any bridges you still need into `config.yaml`.
-
 ### Failure isolation
 
 A bridge that hits a fatal, non-recoverable error (as opposed to a

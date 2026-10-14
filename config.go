@@ -36,10 +36,8 @@ var supportedBridgeModes = map[string]bool{
 	"udp":  true, // relay datagrams; listen is a UDP bind address (host:port)
 }
 
-// BridgeConfig is one listen-socket -> tailnet-target mapping. It doubles
-// as the management API's JSON request/response body and the schema of
-// managed-bridges.yaml (see manage.go) -- both are "just another bridges:
-// list" in the same shape as config.yaml's.
+// BridgeConfig is one listen-socket -> tailnet-target mapping, the schema
+// of an entry in config.yaml's bridges: list.
 type BridgeConfig struct {
 	Name string `yaml:"name" json:"name"`
 	// Listen is a Unix socket path, or a host:port to accept on a TCP port
@@ -363,10 +361,7 @@ func checkBridges(bridges []BridgeConfig) error {
 
 // normalizeBridge lowercases/trims Mode (filling in the default when
 // empty) and resolves Enabled to a concrete, always-non-nil pointer
-// (defaulting to true when omitted). Applied uniformly to a bridge
-// however it was sourced -- config.yaml, managed-bridges.yaml, or a
-// management API request -- so all three accept the same shorthand
-// (mode:/enabled: omitted) and end up with the same normalized shape.
+// (defaulting to true when omitted), so a bridge can omit mode:/enabled:.
 func normalizeBridge(b *BridgeConfig) {
 	b.Mode = strings.ToLower(strings.TrimSpace(b.Mode))
 	if b.Mode == "" {

@@ -11,7 +11,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -110,15 +109,6 @@ func run() error {
 		return fmt.Errorf("getting local client: %w", err)
 	}
 
-	// Bridges used to be addable through the management API and persisted
-	// to this file; it is no longer read, so say so rather than silently
-	// dropping them.
-	if cfg.StateDir != "" {
-		legacyPath := filepath.Join(cfg.StateDir, "managed-bridges.yaml")
-		if _, err := os.Stat(legacyPath); err == nil {
-			log.Printf("warning: %s is no longer read: bridges are defined in config.yaml only; move any you still need there", legacyPath)
-		}
-	}
 	manager := newBridgeManager(ctx, srv.Dial, cfg.SocketMode, cfg.SocketGroup, lc.StatusWithoutPeers)
 	started, attempted, err := manager.startAll(cfg.Bridges)
 	if err != nil {
