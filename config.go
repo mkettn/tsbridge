@@ -273,11 +273,6 @@ func readRawConfig(path string) (*rawConfig, error) {
 	return &cfg, nil
 }
 
-// validateBridgeFields checks one bridge's own fields in isolation --
-// required fields present, mode supported, rewrite_host only where it
-// applies. It doesn't know about any other bridge, so duplicate name/listen
-// checks live in checkBridges (the static list) and bridgeManager.Add (a
-// single new bridge against whatever's currently running) instead.
 // bridgeNameRE is the set of characters a bridge name may contain. Names
 // appear in log lines and in the management API's /bridges/{name} URLs, so
 // restricting them means nothing there ever needs escaping.
@@ -289,6 +284,10 @@ func validBridgeName(name string) bool {
 	return bridgeNameRE.MatchString(name) && strings.Trim(name, ".") != ""
 }
 
+// validateBridgeFields checks one bridge's own fields in isolation --
+// required fields present, mode supported, rewrite_host only where it
+// applies. It doesn't know about any other bridge, so duplicate name/listen
+// checks live in checkBridges.
 func validateBridgeFields(b BridgeConfig) error {
 	if b.Name == "" {
 		return fmt.Errorf("a bridge is missing required field 'name'")

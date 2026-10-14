@@ -314,11 +314,8 @@ func TestValidateBridgeFields_Name(t *testing.T) {
 	} {
 		b := BridgeConfig{Name: name, Listen: "/x.sock", Targets: Targets{"t:1"}, Mode: "tcp"}
 		err := validateBridgeFields(b)
-		if name != "" && (err == nil) != ok {
+		if (err == nil) != ok {
 			t.Errorf("name %q: valid=%v, err=%v", name, ok, err)
-		}
-		if name == "" && err == nil {
-			t.Error("empty name should be rejected")
 		}
 	}
 }

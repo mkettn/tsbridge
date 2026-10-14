@@ -194,7 +194,7 @@ Each bridge entry:
 
 ```yaml
 - name: my-service          # unique identifier, used in logs and error messages;
-                            # letters, digits, "_", "." and "-" only
+                            # letters, digits, "_", "." and "-" only, not all dots
   listen: /run/tsbridge/my-service.sock   # Unix socket path to create, or a host:port --
                                           # see "TCP and UDP listeners" below
   target: [remote-machine:1234]           # list of host:port targets reachable over the tailnet --
