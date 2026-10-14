@@ -1,8 +1,8 @@
 <!--
-  Small example UI for tsbridge's runtime management API (see
-  README.md's "Runtime bridge management" section): lists running
-  bridges and lets you add/remove them, talking to the API directly
-  from the browser with plain fetch() calls against relative URLs.
+  Small example status page for tsbridge's read-only management API (see
+  README.md's "Management API" section): lists bridges and their
+  health, talking to the API directly from the browser with plain
+  fetch() calls against relative URLs.
 
   Served by Caddy (see ../Caddyfile) on http://localhost:1235, the same
   origin Caddy reverse-proxies /bridges and /bridges/* to tsbridge's
@@ -38,18 +38,6 @@
   code { font-size: .85em; opacity: .85; }
   .empty { opacity: .6; font-style: italic; }
   .badge { display: inline-block; padding: .05rem .45rem; border-radius: 1rem; font-size: .75rem; border: 1px solid currentColor; opacity: .75; }
-  fieldset { border: 1px solid color-mix(in srgb, currentColor 20%, transparent); border-radius: .5rem; padding: 1rem 1.25rem 1.25rem; margin: 1.5rem 0; }
-  legend { font-size: .95rem; font-weight: 600; padding: 0 .4rem; }
-  form { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .75rem 1rem; align-items: end; }
-  label { display: block; font-size: .78rem; opacity: .75; margin-bottom: .25rem; }
-  input[type=text] { width: 100%; box-sizing: border-box; padding: .4rem .5rem; font: inherit; }
-  select { width: 100%; box-sizing: border-box; padding: .4rem .5rem; font: inherit; }
-  .checkbox-field { display: flex; align-items: center; gap: .4rem; padding-bottom: .35rem; }
-  .checkbox-field label { margin: 0; }
-  button { padding: .4rem .9rem; font: inherit; cursor: pointer; }
-  button.remove { color: #c0362c; border-color: currentColor; background: none; border-radius: .35rem; }
-  .row-actions { display: flex; gap: .4rem; }
-  .row-actions button { padding: .3rem .6rem; font-size: .82rem; }
   #error { color: #c0362c; white-space: pre-wrap; font-size: .88rem; margin: .75rem 0; }
   #error:empty { display: none; }
   #status { display: flex; flex-wrap: wrap; gap: .4rem .6rem; align-items: center; margin: 1rem 0; font-size: .88rem; }
@@ -69,46 +57,10 @@
 
 <table>
   <thead>
-    <tr><th>Name</th><th>Mode</th><th>Source</th><th>State</th><th>Listen</th><th>Target</th><th></th></tr>
+    <tr><th>Name</th><th>Mode</th><th>State</th><th>Listen</th><th>Target</th></tr>
   </thead>
-  <tbody id="rows"><tr><td colspan="7" class="empty">loading&hellip;</td></tr></tbody>
+  <tbody id="rows"><tr><td colspan="5" class="empty">loading&hellip;</td></tr></tbody>
 </table>
-
-<fieldset>
-  <legend>Add a bridge</legend>
-  <form id="add-form">
-    <div>
-      <label for="f-name">Name</label>
-      <input type="text" id="f-name" required placeholder="my-service" autocomplete="off">
-    </div>
-    <div>
-      <label for="f-listen">Listen (absolute path)</label>
-      <input type="text" id="f-listen" required placeholder="/run/tsbridge/my-service.sock" autocomplete="off">
-    </div>
-    <div>
-      <label for="f-target">Target(s) (host:port, comma-separated for round-robin)</label>
-      <input type="text" id="f-target" required placeholder="remote-machine:1234" autocomplete="off">
-    </div>
-    <div>
-      <label for="f-mode">Mode</label>
-      <select id="f-mode">
-        <option value="tcp">tcp</option>
-        <option value="http">http</option>
-      </select>
-    </div>
-    <div class="checkbox-field">
-      <input type="checkbox" id="f-rewrite-host">
-      <label for="f-rewrite-host">rewrite_host (http only)</label>
-    </div>
-    <div class="checkbox-field">
-      <input type="checkbox" id="f-enabled" checked>
-      <label for="f-enabled">enabled</label>
-    </div>
-    <div>
-      <button type="submit">Add bridge</button>
-    </div>
-  </form>
-</fieldset>
 
 <script>
 "use strict";
@@ -116,7 +68,6 @@
 const rowsEl = document.getElementById("rows");
 const errorEl = document.getElementById("error");
 const statusEl = document.getElementById("status");
-const form = document.getElementById("add-form");
 
 function showError(message) {
   errorEl.textContent = message;
@@ -167,30 +118,12 @@ function stateCell(bridge) {
 }
 
 function renderRow(bridge) {
-  // enabled: true, running: false is the crashed-but-intended state --
-  // clicking the generic toggle there would call /disable (since
-  // bridge.enabled is already true), taking one extra round trip to
-  // reach the /enable retry the state actually calls for, and along the
-  // way persisting enabled: false for a managed bridge someone was
-  // trying to recover. Route that state straight to enableBridge instead.
-  const canRetry = bridge.enabled && !bridge.running;
-  const toggleBtn = el("button", {
-    textContent: bridge.enabled ? (canRetry ? "Retry" : "Disable") : "Enable",
-    onclick: () => (canRetry ? enableBridge(bridge.name) : toggleBridge(bridge)),
-  });
-  const removeBtn = el("button", {
-    className: "remove",
-    textContent: "Remove",
-    onclick: () => removeBridge(bridge.name),
-  });
   return el("tr", {}, [
     el("td", {}, [el("code", { textContent: bridge.name })]),
     el("td", { textContent: bridge.mode + (bridge.mode === "http" && bridge.rewrite_host ? " (rewrite_host)" : "") }),
-    el("td", {}, [el("span", { className: "badge", textContent: bridge.source })]),
     stateCell(bridge),
     el("td", {}, [el("code", { textContent: bridge.listen })]),
     el("td", {}, [el("code", { textContent: (bridge.target || []).join(", ") })]),
-    el("td", {}, [el("div", { className: "row-actions" }, [toggleBtn, removeBtn])]),
   ]);
 }
 
@@ -231,64 +164,12 @@ async function refresh() {
 
   rowsEl.replaceChildren();
   if (!bridges || bridges.length === 0) {
-    rowsEl.append(el("tr", {}, [el("td", { colSpan: 7, className: "empty", textContent: "no bridges running" })]));
+    rowsEl.append(el("tr", {}, [el("td", { colSpan: 5, className: "empty", textContent: "no bridges configured" })]));
     return;
   }
   bridges.sort((a, b) => a.name.localeCompare(b.name));
   for (const bridge of bridges) rowsEl.append(renderRow(bridge));
 }
-
-async function removeBridge(name) {
-  try {
-    const res = await fetch(`/bridges/${encodeURIComponent(name)}`, { method: "DELETE" });
-    if (!res.ok) throw new Error(`removing ${name}: ${await messageFromResponse(res)}`);
-  } catch (err) {
-    showError(String(err.message || err));
-  }
-  refresh();
-}
-
-async function postBridgeAction(name, action) {
-  try {
-    const res = await fetch(`/bridges/${encodeURIComponent(name)}/${action}`, { method: "POST" });
-    if (!res.ok) throw new Error(`${action}ing ${name}: ${await messageFromResponse(res)}`);
-  } catch (err) {
-    showError(String(err.message || err));
-  }
-  refresh();
-}
-
-function toggleBridge(bridge) {
-  return postBridgeAction(bridge.name, bridge.enabled ? "disable" : "enable");
-}
-
-function enableBridge(name) {
-  return postBridgeAction(name, "enable");
-}
-
-form.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const body = {
-    name: document.getElementById("f-name").value.trim(),
-    listen: document.getElementById("f-listen").value.trim(),
-    target: document.getElementById("f-target").value.split(/[\s,]+/).filter(Boolean),
-    mode: document.getElementById("f-mode").value,
-    rewrite_host: document.getElementById("f-rewrite-host").checked,
-    enabled: document.getElementById("f-enabled").checked,
-  };
-  try {
-    const res = await fetch("/bridges", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error(`adding ${body.name || "bridge"}: ${await messageFromResponse(res)}`);
-    form.reset();
-  } catch (err) {
-    showError(String(err.message || err));
-  }
-  refresh();
-});
 
 refresh();
 </script>

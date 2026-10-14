@@ -42,21 +42,14 @@ ephemeral: false
 # omitted.
 socket_mode: "0660"
 
-# Unix socket for the runtime management API: add and remove bridges
-# while tsbridge keeps running, instead of editing this file and
-# restarting. Leave unset (the default) to disable it entirely -- no
-# socket is created and bridges can only come from bridges: below.
+# Unix socket for the read-only management API: tailnet status and each
+# bridge's health (GET /status, GET /bridges). It cannot add, change or
+# remove bridges -- edit this file and restart for that. Leave unset (the
+# default) to disable it entirely -- no socket is created. See README.md's
+# "Management API" section.
 #
-# Bridges added through the API are persisted to
-# state_dir/managed-bridges.yaml (hence state_dir being required once
-# this is set) and merged in alongside bridges: below on every restart;
-# see README.md's "Runtime bridge management" section for the request
-# format and the full add/remove/restart semantics.
-#
-# This socket can create and remove bridges to arbitrary tailnet targets
-# -- a much bigger blast radius than any single bridge socket -- so it
-# defaults to "0600" (owner-only) rather than socket_mode's "0660", and
-# has its own independent group setting below rather than reusing
+# It defaults to "0600" (owner-only) rather than socket_mode's "0660",
+# and has its own independent group setting below rather than reusing
 # socket_group.
 # management_socket: /run/tsbridge/control.sock
 # management_socket_mode: "0600"
@@ -88,6 +81,5 @@ bridges:
     target: [third-machine:9090]
     # Optional, defaults to true. false defines the bridge (it shows up
     # in management_socket's GET /bridges, occupying this listen path)
-    # but doesn't create its socket -- see README's "Runtime bridge
-    # management" section for enabling it later without a restart.
+    # but doesn't create its socket.
     enabled: false

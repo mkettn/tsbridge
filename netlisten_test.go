@@ -289,7 +289,6 @@ func TestTargets_Unmarshal(t *testing.T) {
 
 	for in, want := range map[string]string{
 		`{"target":["a:1","b:2"]}`: "a:1 b:2",
-		`{"target":"a:1"}`:         "a:1",
 	} {
 		var b BridgeConfig
 		if err := json.Unmarshal([]byte(in), &b); err != nil {
@@ -299,9 +298,25 @@ func TestTargets_Unmarshal(t *testing.T) {
 			t.Errorf("%s: got %q, want %q", in, got, want)
 		}
 	}
+	if err := json.Unmarshal([]byte(`{"target":"a:1"}`), &BridgeConfig{}); err == nil {
+		t.Error("a JSON string target should be rejected")
+	}
 	out, _ := json.Marshal(BridgeConfig{Targets: Targets{"a:1"}})
 	if !strings.Contains(string(out), `"target":["a:1"]`) {
 		t.Errorf("marshal should emit a list: %s", out)
+	}
+}
+
+func TestValidateBridgeFields_Name(t *testing.T) {
+	for name, ok := range map[string]bool{
+		"svc": true, "My_Service-2.v1": true,
+		"": false, "a b": false, "a/b": false, "a%2Fb": false, "a:b": false, "é": false, ".": false, "..": false, "a\n": false,
+	} {
+		b := BridgeConfig{Name: name, Listen: "/x.sock", Targets: Targets{"t:1"}, Mode: "tcp"}
+		err := validateBridgeFields(b)
+		if (err == nil) != ok {
+			t.Errorf("name %q: valid=%v, err=%v", name, ok, err)
+		}
 	}
 }
 
