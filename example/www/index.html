@@ -86,7 +86,7 @@
       <input type="text" id="f-listen" required placeholder="/run/tsbridge/my-service.sock" autocomplete="off">
     </div>
     <div>
-      <label for="f-target">Target (host:port)</label>
+      <label for="f-target">Target(s) (host:port, comma-separated for round-robin)</label>
       <input type="text" id="f-target" required placeholder="remote-machine:1234" autocomplete="off">
     </div>
     <div>
@@ -189,7 +189,7 @@ function renderRow(bridge) {
     el("td", {}, [el("span", { className: "badge", textContent: bridge.source })]),
     stateCell(bridge),
     el("td", {}, [el("code", { textContent: bridge.listen })]),
-    el("td", {}, [el("code", { textContent: bridge.target })]),
+    el("td", {}, [el("code", { textContent: (bridge.target || []).join(", ") })]),
     el("td", {}, [el("div", { className: "row-actions" }, [toggleBtn, removeBtn])]),
   ]);
 }
@@ -271,7 +271,7 @@ form.addEventListener("submit", async (event) => {
   const body = {
     name: document.getElementById("f-name").value.trim(),
     listen: document.getElementById("f-listen").value.trim(),
-    target: document.getElementById("f-target").value.trim(),
+    target: document.getElementById("f-target").value.split(/[\s,]+/).filter(Boolean),
     mode: document.getElementById("f-mode").value,
     rewrite_host: document.getElementById("f-rewrite-host").checked,
     enabled: document.getElementById("f-enabled").checked,
