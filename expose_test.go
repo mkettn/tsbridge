@@ -148,9 +148,10 @@ func TestExpose_HTTP(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var gotForwarded, gotPath, gotProto string
+			var gotForwarded, gotPath, gotProto, gotSpoof string
 			srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				gotForwarded, gotPath, gotProto = r.Header.Get("X-Forwarded-For"), r.URL.Path, r.Header.Get("X-Forwarded-Proto")
+				gotSpoof = r.Header.Get("Forwarded") + r.Header.Get("X-Forwarded-Host")
 				io.WriteString(w, "hi from backend")
 			})}
 			go srv.Serve(backend)
@@ -166,7 +167,9 @@ func TestExpose_HTTP(t *testing.T) {
 			defer shutdownNow(rb)
 
 			req, _ := http.NewRequest("GET", "http://"+lt.tcp.Addr().String()+"/some/path", nil)
-			req.Header.Set("X-Forwarded-Proto", "https") // a spoofed claim must not survive
+			req.Header.Set("X-Forwarded-Proto", "https") // spoofed claims must not survive
+			req.Header.Set("Forwarded", "proto=https;host=evil.example")
+			req.Header.Set("X-Forwarded-Host", "evil.example")
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				t.Fatal(err)
@@ -178,6 +181,9 @@ func TestExpose_HTTP(t *testing.T) {
 			}
 			if gotPath != "/some/path" {
 				t.Errorf("backend saw path %q", gotPath)
+			}
+			if gotSpoof != "" {
+				t.Errorf("client-supplied Forwarded/X-Forwarded-Host reached the backend: %q", gotSpoof)
 			}
 			if gotProto != "http" {
 				t.Errorf("X-Forwarded-Proto = %q, want http", gotProto)
@@ -270,7 +276,9 @@ func TestCheckExpose(t *testing.T) {
 		{"missing target", []ExposeConfig{with(func(e *ExposeConfig) { e.Target = "" })}, "target"},
 		{"udp target is a path", []ExposeConfig{with(func(e *ExposeConfig) { e.Mode = "udp"; e.Target = "/run/a.sock" })}, "host:port"},
 		{"target port zero", []ExposeConfig{with(func(e *ExposeConfig) { e.Target = "127.0.0.1:0" })}, "invalid port"},
-		{"duplicate name", []ExposeConfig{ok, with(func(e *ExposeConfig) { e.Port = 81 })}, "duplicate expose name"},
+		{"duplicate name", []ExposeConfig{ok, with(func(e *ExposeConfig) { e.Port = 81 })}, "duplicate name"},
+		{"tcp and https share a port", []ExposeConfig{ok, with(func(e *ExposeConfig) { e.Name = "b"; e.Mode = "https" })}, "duplicate expose port 80 on tcp"},
+		{"http and https share a port", []ExposeConfig{with(func(e *ExposeConfig) { e.Mode = "http" }), with(func(e *ExposeConfig) { e.Name = "b"; e.Mode = "https" })}, "duplicate expose port"},
 		{"duplicate port", []ExposeConfig{ok, with(func(e *ExposeConfig) { e.Name = "b" })}, "duplicate expose port"},
 	}
 	for _, tt := range tests {
@@ -279,7 +287,7 @@ func TestCheckExpose(t *testing.T) {
 			for i := range list {
 				normalizeExpose(&list[i])
 			}
-			err := checkExpose(list)
+			err := checkExpose(list, nil)
 			switch {
 			case tt.want == "" && err != nil:
 				t.Errorf("unexpected error: %v", err)
@@ -452,5 +460,16 @@ func TestExpose_HTTPSBadCertificate(t *testing.T) {
 	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "site") {
 		t.Errorf("err = %v", err)
+	}
+}
+
+func TestCheckExpose_NameCollidesWithBridge(t *testing.T) {
+	list := []ExposeConfig{{Name: "web", Port: 80, Mode: "tcp", Target: "127.0.0.1:8080"}}
+	err := checkExpose(list, []BridgeConfig{{Name: "web"}})
+	if err == nil || !strings.Contains(err.Error(), "duplicate name") {
+		t.Errorf("err = %v", err)
+	}
+	if err := checkExpose(list, []BridgeConfig{{Name: "other"}}); err != nil {
+		t.Errorf("unexpected error: %v", err)
 	}
 }

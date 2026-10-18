@@ -387,7 +387,8 @@ expose:
 - `http` reverse-proxies each request to the target (a host port or a Unix
   socket) instead of copying bytes; the target sees the tailnet peer's
   address in `X-Forwarded-For` and the scheme in `X-Forwarded-Proto` (set
-  by tsbridge, never taken from the client), and the client's `Host` header passes through
+  by tsbridge; a client-sent `X-Forwarded-Proto`, `Forwarded` or
+  `X-Forwarded-Host` is dropped), and the client's `Host` header passes through
   unchanged. The tailnet port is plain HTTP; WireGuard already encrypts the
   tailnet leg.
 - `https` is `http` with TLS terminated on the tailnet port (requests still
@@ -629,6 +630,23 @@ definitions and destinations for your setup:
 Adjust `dst` to match every `target:` in your `bridges:` list, and nothing
 more.
 
+If you use [`expose:`](#exposing-host-services-to-the-tailnet), the node
+also needs **inbound** rules: ACLs are the only access control on exposed
+ports, and without a rule nothing on the tailnet can connect to them. Add
+one per group of peers, listing exactly the exposed ports:
+
+```jsonc
+// Who may reach the ports tsbridge exposes.
+{
+  "action": "accept",
+  "src": ["group:devs"],
+  "dst": ["tag:tsbridge:8080", "tag:tsbridge:443"],
+},
+```
+
+So `dst` in the outbound rule covers every `target:` in `bridges:`, and the
+inbound rule covers every `port:` in `expose:`, and nothing more.
+
 ## Signal handling / shutdown
 
 `tsbridge` handles `SIGTERM` and `SIGINT` by stopping every bridge and
@@ -824,7 +842,8 @@ path "..."`) rather than failing partway through startup.
   fail-fast at startup; restart `tsbridge` to pick up a `config.yaml`
   edit. The management API is read-only.
 - No protocol awareness in `tcp` mode (the default) — it copies raw TCP
-  bytes in both directions. `mode: http` is the one deliberate exception
-  (see [HTTP mode](#http-mode-reverse-proxy)); anything else
-  protocol-specific (TLS termination, gRPC, etc.) still belongs in
-  whatever connects to the Unix socket, not here.
+  bytes in both directions. `mode: http` (see
+  [HTTP mode](#http-mode-reverse-proxy)) and, for `expose:`, `mode: https`
+  (TLS termination) are the deliberate exceptions; anything else
+  protocol-specific (gRPC routing, etc.) still belongs in whatever
+  connects to the socket, not here.

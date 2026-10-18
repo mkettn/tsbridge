@@ -26,15 +26,15 @@ type ExposeConfig struct {
 	// Mode is "tcp" (the default), "http", "https" or "udp". It decides what
 	// the tailnet port is and what Target may be: tcp forwards a byte
 	// stream, http reverse-proxies each request and https does the same
-	// after terminating TLS, all to a Unix socket path or a host:port; udp relays datagrams to a host:port (UDP has no
-	// sockets-by-path).
+	// after terminating TLS, all to a Unix socket path or a host:port; udp
+	// relays datagrams to a host:port (UDP has no sockets-by-path).
 	Mode string `yaml:"mode"`
 	// Target is where the host side lives, written like a bridge's listen:
 	// an IP literal or localhost plus port, otherwise a Unix socket path
 	// (relative paths resolve against the config file's directory).
 	Target string `yaml:"target"`
 	// TLSCert and TLSKey (PEM files, both or neither) are the certificate
-	// mode: https serves. Without them the tailnet provisions one for this
+	// served by mode: https. Without them the tailnet provisions one for this
 	// node's name. Either way the request reaches Target as plain HTTP.
 	TLSCert string `yaml:"tls_cert,omitempty"`
 	TLSKey  string `yaml:"tls_key,omitempty"`
@@ -87,23 +87,31 @@ func validateExposeFields(e ExposeConfig) error {
 	return nil
 }
 
-// checkExpose validates each entry and rejects duplicate names, or two
-// entries claiming the same port on the same protocol (tcp and udp are
-// separate port spaces).
-func checkExpose(list []ExposeConfig) error {
+// checkExpose validates each entry and rejects duplicate names -- among
+// the entries and against the bridges, since both are logged under their
+// name -- or two entries claiming the same port on the same protocol.
+// tcp, http and https all bind a TCP port; udp is a separate port space.
+func checkExpose(list []ExposeConfig, bridges []BridgeConfig) error {
 	names := map[string]bool{}
+	for _, b := range bridges {
+		names[b.Name] = true
+	}
 	ports := map[string]bool{}
 	for _, e := range list {
 		if err := validateExposeFields(e); err != nil {
 			return err
 		}
 		if names[e.Name] {
-			return fmt.Errorf("duplicate expose name %q", e.Name)
+			return fmt.Errorf("duplicate name %q: expose entries and bridges share one namespace", e.Name)
 		}
 		names[e.Name] = true
-		key := e.Mode + "!" + strconv.Itoa(e.Port)
+		proto := "tcp"
+		if e.Mode == "udp" {
+			proto = "udp"
+		}
+		key := proto + "!" + strconv.Itoa(e.Port)
 		if ports[key] {
-			return fmt.Errorf("duplicate expose port %d on %s", e.Port, e.Mode)
+			return fmt.Errorf("duplicate expose port %d on %s", e.Port, proto)
 		}
 		ports[key] = true
 	}

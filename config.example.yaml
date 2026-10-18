@@ -85,9 +85,9 @@ bridges:
     enabled: false
 
 # Ports on this node's tailnet address that forward to the host, the
-# opposite direction of bridges. `mode` is "tcp" (default), "http", "https" or "udp";
-# `target` is a host:port (IP literal or localhost) or, for tcp, a Unix
-# socket path. Access is controlled by your tailnet ACLs. See README.md's
+# opposite direction of bridges. `mode` is "tcp" (default), "http", "https"
+# or "udp"; `target` is a host:port (IP literal or localhost) or, for
+# anything but udp, a Unix socket path. Access is controlled by your tailnet ACLs. See README.md's
 # "Exposing host services" section.
 # expose:
 #   - name: web

@@ -196,7 +196,7 @@ func LoadConfig(path string) (*Config, error) {
 		expose[i].TLSCert = resolvePath(baseDir, expose[i].TLSCert)
 		expose[i].TLSKey = resolvePath(baseDir, expose[i].TLSKey)
 	}
-	if err := checkExpose(expose); err != nil {
+	if err := checkExpose(expose, bridges); err != nil {
 		return nil, err
 	}
 
