@@ -75,6 +75,12 @@ type BridgeConfig struct {
 	// global value"; each is independent of the other.
 	SocketGroup string `yaml:"socket_group,omitempty" json:"socket_group,omitempty"`
 	SocketMode  string `yaml:"socket_mode,omitempty" json:"socket_mode,omitempty"`
+
+	// forwardProto makes an http proxy set X-Forwarded-Proto from the scheme
+	// the client used and drop the client's own Forwarded, X-Forwarded-Proto
+	// and X-Forwarded-Host. Not configurable: expose sets it, since its
+	// backend can't otherwise tell http from https.
+	forwardProto bool
 }
 
 // Targets is a bridge's list of tailnet targets. In YAML and JSON it is
@@ -143,6 +149,7 @@ type Config struct {
 	ManagementSocketGroup string
 	ManagementSocketMode  os.FileMode
 	Bridges               []BridgeConfig
+	Expose                []ExposeConfig
 }
 
 // rawConfig mirrors the config.yaml schema.
@@ -157,6 +164,7 @@ type rawConfig struct {
 	ManagementSocketGroup string         `yaml:"management_socket_group"`
 	ManagementSocketMode  string         `yaml:"management_socket_mode"`
 	Bridges               []BridgeConfig `yaml:"bridges"`
+	Expose                []ExposeConfig `yaml:"expose"`
 }
 
 // LoadConfig reads and validates the config file at path. Any error
@@ -177,6 +185,19 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	if err := checkBridges(bridges); err != nil {
+		return nil, err
+	}
+
+	expose := raw.Expose
+	for i := range expose {
+		normalizeExpose(&expose[i])
+		if n, _ := parseEndpoint(expose[i].Mode, expose[i].Target); n == "unix" {
+			expose[i].Target = resolvePath(baseDir, expose[i].Target)
+		}
+		expose[i].TLSCert = resolvePath(baseDir, expose[i].TLSCert)
+		expose[i].TLSKey = resolvePath(baseDir, expose[i].TLSKey)
+	}
+	if err := checkExpose(expose, bridges); err != nil {
 		return nil, err
 	}
 
@@ -246,6 +267,7 @@ func LoadConfig(path string) (*Config, error) {
 		ManagementSocketGroup: raw.ManagementSocketGroup,
 		ManagementSocketMode:  managementMode,
 		Bridges:               bridges,
+		Expose:                expose,
 	}, nil
 }
 
@@ -419,24 +441,30 @@ func isNetworkListen(b BridgeConfig) bool {
 // colons and no "/" (e.g. "a:b:c.sock") is taken for an unbracketed IPv6
 // address and rejected; write "./a:b:c.sock".
 func parseListen(b BridgeConfig) (network, addr string) {
-	if b.Mode == "udp" {
-		return "udp", b.Listen
+	return parseEndpoint(b.Mode, b.Listen)
+}
+
+// parseEndpoint is parseListen's rule, shared with expose: targets (the
+// local address a tailnet port forwards to), for any mode and address string.
+func parseEndpoint(mode, listen string) (network, addr string) {
+	if mode == "udp" {
+		return "udp", listen
 	}
-	if !strings.Contains(b.Listen, "/") && !strings.HasPrefix(b.Listen, "[") && strings.Count(b.Listen, ":") >= 2 {
+	if !strings.Contains(listen, "/") && !strings.HasPrefix(listen, "[") && strings.Count(listen, ":") >= 2 {
 		// Unbracketed IPv6 + port (::1:8080): SplitHostPort can't parse it
 		// and it's not a credible socket filename, so claim it as TCP and
 		// let validateBridgeFields reject it with a useful message rather
 		// than silently creating a socket file named after the address.
-		return "tcp", b.Listen
+		return "tcp", listen
 	}
-	if host, port, err := net.SplitHostPort(b.Listen); err == nil {
+	if host, port, err := net.SplitHostPort(listen); err == nil {
 		if _, err := strconv.ParseUint(port, 10, 16); err == nil {
 			if isBindHost(host) {
-				return "tcp", b.Listen
+				return "tcp", listen
 			}
 		}
 	}
-	return "unix", b.Listen
+	return "unix", listen
 }
 
 // listenKey identifies what a bridge binds for duplicate detection. TCP and

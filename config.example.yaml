@@ -83,3 +83,30 @@ bridges:
     # in management_socket's GET /bridges, occupying this listen path)
     # but doesn't create its socket.
     enabled: false
+
+# Ports on this node's tailnet address that forward to the host, the
+# opposite direction of bridges. `mode` is "tcp" (default), "http", "https"
+# or "udp"; `target` is a host:port (IP literal or localhost) or, for
+# anything but udp, a Unix socket path. Access is controlled by your
+# tailnet ACLs. See README.md's "Exposing host services" section.
+# expose:
+#   - name: web
+#     port: 8080
+#     target: 127.0.0.1:3000
+#   - name: app
+#     port: 9000
+#     target: /run/app/app.sock
+#   - name: site
+#     port: 80
+#     mode: http              # reverse-proxy requests instead of raw bytes
+#     target: 127.0.0.1:3000
+#   - name: secure-site
+#     port: 443
+#     mode: https             # terminate TLS; omit the two files to use the
+#     tls_cert: /etc/tsbridge/site.crt   # tailnet's own certificate (Tailscale only)
+#     tls_key: /etc/tsbridge/site.key
+#     target: 127.0.0.1:3000
+#   - name: dns
+#     port: 53
+#     mode: udp
+#     target: 127.0.0.1:5353
