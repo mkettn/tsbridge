@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -124,6 +125,57 @@ func TestExpose_TCPToUnixSocket(t *testing.T) {
 	}
 }
 
+func TestExpose_HTTP(t *testing.T) {
+	for _, unix := range []bool{false, true} {
+		name := "tcp target"
+		if unix {
+			name = "unix target"
+		}
+		t.Run(name, func(t *testing.T) {
+			network, addr := "tcp", "127.0.0.1:0"
+			if unix {
+				network, addr = "unix", filepath.Join(t.TempDir(), "app.sock")
+			}
+			backend, err := net.Listen(network, addr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var gotForwarded, gotPath string
+			srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotForwarded, gotPath = r.Header.Get("X-Forwarded-For"), r.URL.Path
+				io.WriteString(w, "hi from backend")
+			})}
+			go srv.Serve(backend)
+			defer srv.Close()
+
+			lt := newLoopbackTailnet()
+			rb, err := startExpose(context.Background(), lt.tailnetListen, ExposeConfig{
+				Name: "app", Port: 8080, Mode: "http", Target: backend.Addr().String(),
+			}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer shutdownNow(rb)
+
+			resp, err := http.Get("http://" + lt.tcp.Addr().String() + "/some/path")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode != 200 || string(body) != "hi from backend" {
+				t.Errorf("got %d %q", resp.StatusCode, body)
+			}
+			if gotPath != "/some/path" {
+				t.Errorf("backend saw path %q", gotPath)
+			}
+			if gotForwarded != "127.0.0.1" {
+				t.Errorf("X-Forwarded-For = %q, want the client address", gotForwarded)
+			}
+		})
+	}
+}
+
 func TestExpose_UDP(t *testing.T) {
 	backend, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -196,7 +248,8 @@ func TestCheckExpose(t *testing.T) {
 		{"bad name", []ExposeConfig{with(func(e *ExposeConfig) { e.Name = "a b" })}, "invalid"},
 		{"port zero", []ExposeConfig{with(func(e *ExposeConfig) { e.Port = 0 })}, "port"},
 		{"port too big", []ExposeConfig{with(func(e *ExposeConfig) { e.Port = 70000 })}, "port"},
-		{"bad mode", []ExposeConfig{with(func(e *ExposeConfig) { e.Mode = "http" })}, "unsupported mode"},
+		{"valid http to socket", []ExposeConfig{with(func(e *ExposeConfig) { e.Mode = "http"; e.Target = "/run/a.sock" })}, ""},
+		{"bad mode", []ExposeConfig{with(func(e *ExposeConfig) { e.Mode = "icmp" })}, "unsupported mode"},
 		{"missing target", []ExposeConfig{with(func(e *ExposeConfig) { e.Target = "" })}, "target"},
 		{"udp target is a path", []ExposeConfig{with(func(e *ExposeConfig) { e.Mode = "udp"; e.Target = "/run/a.sock" })}, "host:port"},
 		{"target port zero", []ExposeConfig{with(func(e *ExposeConfig) { e.Target = "127.0.0.1:0" })}, "invalid port"},

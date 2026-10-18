@@ -18,10 +18,11 @@ type ExposeConfig struct {
 	// Port is the port on this node's tailnet address to accept on. Who
 	// on the tailnet may reach it is up to the tailnet's ACLs.
 	Port int `yaml:"port"`
-	// Mode is "tcp" (the default) or "udp". It decides what the tailnet
-	// port is and what Target may be: tcp forwards a byte stream to a Unix
-	// socket path or a host:port; udp relays datagrams to a host:port
-	// (UDP has no sockets-by-path).
+	// Mode is "tcp" (the default), "http" or "udp". It decides what the
+	// tailnet port is and what Target may be: tcp forwards a byte stream
+	// and http reverse-proxies each request, both to a Unix socket path or
+	// a host:port; udp relays datagrams to a host:port (UDP has no
+	// sockets-by-path).
 	Mode string `yaml:"mode"`
 	// Target is where the host side lives, written like a bridge's listen:
 	// an IP literal or localhost plus port, otherwise a Unix socket path
@@ -29,7 +30,7 @@ type ExposeConfig struct {
 	Target string `yaml:"target"`
 }
 
-var supportedExposeModes = map[string]bool{"tcp": true, "udp": true}
+var supportedExposeModes = map[string]bool{"tcp": true, "http": true, "udp": true}
 
 func normalizeExpose(e *ExposeConfig) {
 	e.Mode = strings.ToLower(strings.TrimSpace(e.Mode))
@@ -50,7 +51,7 @@ func validateExposeFields(e ExposeConfig) error {
 		return fmt.Errorf("expose %q: port must be between 1 and 65535", e.Name)
 	}
 	if !supportedExposeModes[e.Mode] {
-		return fmt.Errorf("expose %q has unsupported mode %q; supported modes are tcp, udp", e.Name, e.Mode)
+		return fmt.Errorf("expose %q has unsupported mode %q; supported modes are tcp, http, udp", e.Name, e.Mode)
 	}
 	if e.Target == "" {
 		return fmt.Errorf("expose %q is missing required field 'target'", e.Name)
@@ -135,11 +136,11 @@ func startExpose(ctx context.Context, tn tailnetListen, e ExposeConfig, fatal ch
 			return nil, fmt.Errorf("expose %s: listening on tailnet udp %d: %w", e.Name, e.Port, err)
 		}
 		return serveUDP(ctx, dial, b, pc, udpSessionIdleTimeout, fatal), nil
-	default:
+	default: // tcp and http both accept a stream on the tailnet port
 		l, err := tn.Listen("tcp", ":"+strconv.Itoa(e.Port))
 		if err != nil {
 			return nil, fmt.Errorf("expose %s: listening on tailnet tcp %d: %w", e.Name, e.Port, err)
 		}
-		return startTCPBridge(ctx, dial, b, l, fatal), nil
+		return startListener(ctx, dial, b, l, fatal), nil
 	}
 }

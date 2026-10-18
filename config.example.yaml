@@ -85,7 +85,7 @@ bridges:
     enabled: false
 
 # Ports on this node's tailnet address that forward to the host, the
-# opposite direction of bridges. `mode` is "tcp" (default) or "udp";
+# opposite direction of bridges. `mode` is "tcp" (default), "http" or "udp";
 # `target` is a host:port (IP literal or localhost) or, for tcp, a Unix
 # socket path. Access is controlled by your tailnet ACLs. See README.md's
 # "Exposing host services" section.
@@ -96,6 +96,10 @@ bridges:
 #   - name: app
 #     port: 9000
 #     target: /run/app/app.sock
+#   - name: site
+#     port: 80
+#     mode: http              # reverse-proxy requests instead of raw bytes
+#     target: 127.0.0.1:3000
 #   - name: dns
 #     port: 53
 #     mode: udp

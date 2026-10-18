@@ -376,13 +376,18 @@ expose:
 |----------|---------|
 | `name`   | Unique identifier, same character rules as a bridge name. |
 | `port`   | 1-65535. The port is taken on the node's own tailnet address. |
-| `mode`   | `tcp` (default) or `udp`. |
+| `mode`   | `tcp` (default), `http` or `udp`. |
 | `target` | Where the traffic goes on the host. Written like a bridge's `listen:`: an IP literal or `localhost` plus a port, otherwise a Unix socket path (relative paths resolve against the config file's directory). `mode: udp` needs a `host:port`. |
 
 - **Who can connect** is decided by your tailnet's ACLs; tsbridge adds no
   access control of its own. Anything that can reach the port reaches the
   target, so prefer loopback targets and narrow the ACL to the peers that
   need it.
+- `http` reverse-proxies each request to the target (a host port or a Unix
+  socket) instead of copying bytes; the target sees the tailnet peer's
+  address in `X-Forwarded-For`, and the client's `Host` header passes through
+  unchanged. It does not terminate TLS: use plain HTTP on the tailnet port
+  (WireGuard already encrypts the tailnet leg).
 - `tcp` copies bytes both ways (one tailnet connection per host connection).
   `udp` relays datagrams, with one host-side socket per tailnet client that
   idles out after 60 seconds, as for UDP bridges. UDP listens on the node's
@@ -391,7 +396,7 @@ expose:
   Unix socket path. Use an IP literal or `localhost`.
 - A port that cannot be opened (for example one already in use) stops
   tsbridge at startup. Exposed ports are not shown by the management API.
-- There is one target per entry (no round robin), and no `http` mode.
+- There is one target per entry (no round robin).
 
 ## Management API (read-only)
 
