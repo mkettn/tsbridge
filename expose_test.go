@@ -148,9 +148,9 @@ func TestExpose_HTTP(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			var gotForwarded, gotPath string
+			var gotForwarded, gotPath, gotProto string
 			srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				gotForwarded, gotPath = r.Header.Get("X-Forwarded-For"), r.URL.Path
+				gotForwarded, gotPath, gotProto = r.Header.Get("X-Forwarded-For"), r.URL.Path, r.Header.Get("X-Forwarded-Proto")
 				io.WriteString(w, "hi from backend")
 			})}
 			go srv.Serve(backend)
@@ -165,7 +165,9 @@ func TestExpose_HTTP(t *testing.T) {
 			}
 			defer shutdownNow(rb)
 
-			resp, err := http.Get("http://" + lt.tcp.Addr().String() + "/some/path")
+			req, _ := http.NewRequest("GET", "http://"+lt.tcp.Addr().String()+"/some/path", nil)
+			req.Header.Set("X-Forwarded-Proto", "https") // a spoofed claim must not survive
+			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -176,6 +178,9 @@ func TestExpose_HTTP(t *testing.T) {
 			}
 			if gotPath != "/some/path" {
 				t.Errorf("backend saw path %q", gotPath)
+			}
+			if gotProto != "http" {
+				t.Errorf("X-Forwarded-Proto = %q, want http", gotProto)
 			}
 			if gotForwarded != "127.0.0.1" {
 				t.Errorf("X-Forwarded-For = %q, want the client address", gotForwarded)
@@ -365,8 +370,9 @@ func TestExpose_HTTPSWithCertificateFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	var gotTLS bool
+	var gotProto string
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotTLS = r.TLS != nil
+		gotTLS, gotProto = r.TLS != nil, r.Header.Get("X-Forwarded-Proto")
 		io.WriteString(w, "secure hello")
 	})}
 	go srv.Serve(backend)
@@ -393,6 +399,9 @@ func TestExpose_HTTPSWithCertificateFiles(t *testing.T) {
 	resp.Body.Close()
 	if string(body) != "secure hello" || gotTLS {
 		t.Errorf("body %q, backend saw TLS=%v (want plain HTTP to the backend)", body, gotTLS)
+	}
+	if gotProto != "https" {
+		t.Errorf("X-Forwarded-Proto = %q, want https", gotProto)
 	}
 
 	// A renewed pair is served without a restart.

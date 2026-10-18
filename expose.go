@@ -143,6 +143,8 @@ func startExpose(ctx context.Context, tn tailnetListen, e ExposeConfig, fatal ch
 		Listen:  "tailnet:" + strconv.Itoa(e.Port),
 		Targets: Targets{e.Target},
 		Mode:    e.Mode,
+
+		forwardProto: true,
 	}
 	switch e.Mode {
 	case "udp":

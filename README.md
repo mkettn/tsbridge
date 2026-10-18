@@ -386,11 +386,12 @@ expose:
   need it.
 - `http` reverse-proxies each request to the target (a host port or a Unix
   socket) instead of copying bytes; the target sees the tailnet peer's
-  address in `X-Forwarded-For`, and the client's `Host` header passes through
+  address in `X-Forwarded-For` and the scheme in `X-Forwarded-Proto` (set
+  by tsbridge, never taken from the client), and the client's `Host` header passes through
   unchanged. The tailnet port is plain HTTP; WireGuard already encrypts the
   tailnet leg.
 - `https` is `http` with TLS terminated on the tailnet port (requests still
-  reach the target as plain HTTP). With `tls_cert`/`tls_key` it serves your
+  reach the target as plain HTTP, with `X-Forwarded-Proto: https`). With `tls_cert`/`tls_key` it serves your
   certificate and re-reads the files when they change, so a renewal needs no
   restart; if a replacement fails to load, the previous certificate stays in
   service and the error is logged. Without them, tsbridge asks the tailnet

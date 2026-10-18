@@ -75,6 +75,11 @@ type BridgeConfig struct {
 	// global value"; each is independent of the other.
 	SocketGroup string `yaml:"socket_group,omitempty" json:"socket_group,omitempty"`
 	SocketMode  string `yaml:"socket_mode,omitempty" json:"socket_mode,omitempty"`
+
+	// forwardProto makes an http proxy overwrite X-Forwarded-Proto with the
+	// scheme the client used. Not configurable: expose sets it, since its
+	// backend can't otherwise tell http from https.
+	forwardProto bool
 }
 
 // Targets is a bridge's list of tailnet targets. In YAML and JSON it is
