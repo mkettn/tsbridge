@@ -76,8 +76,9 @@ type BridgeConfig struct {
 	SocketGroup string `yaml:"socket_group,omitempty" json:"socket_group,omitempty"`
 	SocketMode  string `yaml:"socket_mode,omitempty" json:"socket_mode,omitempty"`
 
-	// forwardProto makes an http proxy overwrite X-Forwarded-Proto with the
-	// scheme the client used. Not configurable: expose sets it, since its
+	// forwardProto makes an http proxy set X-Forwarded-Proto from the scheme
+	// the client used and drop the client's own Forwarded, X-Forwarded-Proto
+	// and X-Forwarded-Host. Not configurable: expose sets it, since its
 	// backend can't otherwise tell http from https.
 	forwardProto bool
 }
