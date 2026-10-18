@@ -376,7 +376,8 @@ expose:
 |----------|---------|
 | `name`   | Unique identifier, same character rules as a bridge name. |
 | `port`   | 1-65535. The port is taken on the node's own tailnet address. |
-| `mode`   | `tcp` (default), `http` or `udp`. |
+| `mode`   | `tcp` (default), `http`, `https` or `udp`. |
+| `tls_cert`, `tls_key` | `mode: https` only, both or neither: PEM files for the certificate to serve (relative paths resolve against the config directory). Omit both to use a certificate provisioned by the tailnet. |
 | `target` | Where the traffic goes on the host. Written like a bridge's `listen:`: an IP literal or `localhost` plus a port, otherwise a Unix socket path (relative paths resolve against the config file's directory). `mode: udp` needs a `host:port`. |
 
 - **Who can connect** is decided by your tailnet's ACLs; tsbridge adds no
@@ -386,8 +387,16 @@ expose:
 - `http` reverse-proxies each request to the target (a host port or a Unix
   socket) instead of copying bytes; the target sees the tailnet peer's
   address in `X-Forwarded-For`, and the client's `Host` header passes through
-  unchanged. It does not terminate TLS: use plain HTTP on the tailnet port
-  (WireGuard already encrypts the tailnet leg).
+  unchanged. The tailnet port is plain HTTP; WireGuard already encrypts the
+  tailnet leg.
+- `https` is `http` with TLS terminated on the tailnet port (requests still
+  reach the target as plain HTTP). With `tls_cert`/`tls_key` it serves your
+  certificate and re-reads the files when they change, so a renewal needs no
+  restart; if a replacement fails to load, the previous certificate stays in
+  service and the error is logged. Without them, tsbridge asks the tailnet
+  for a certificate for this node's name (`tsnet`'s `ListenTLS`): that needs
+  HTTPS certificates enabled for a Tailscale tailnet and is not available on
+  Headscale, where you supply the files.
 - `tcp` copies bytes both ways (one tailnet connection per host connection).
   `udp` relays datagrams, with one host-side socket per tailnet client that
   idles out after 60 seconds, as for UDP bridges. UDP listens on the node's

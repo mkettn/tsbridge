@@ -2,11 +2,16 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
+	"log"
 	"net"
 	"net/netip"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 // ExposeConfig is one tailnet-port -> local-address mapping, the schema of
@@ -18,19 +23,24 @@ type ExposeConfig struct {
 	// Port is the port on this node's tailnet address to accept on. Who
 	// on the tailnet may reach it is up to the tailnet's ACLs.
 	Port int `yaml:"port"`
-	// Mode is "tcp" (the default), "http" or "udp". It decides what the
-	// tailnet port is and what Target may be: tcp forwards a byte stream
-	// and http reverse-proxies each request, both to a Unix socket path or
-	// a host:port; udp relays datagrams to a host:port (UDP has no
+	// Mode is "tcp" (the default), "http", "https" or "udp". It decides what
+	// the tailnet port is and what Target may be: tcp forwards a byte
+	// stream, http reverse-proxies each request and https does the same
+	// after terminating TLS, all to a Unix socket path or a host:port; udp relays datagrams to a host:port (UDP has no
 	// sockets-by-path).
 	Mode string `yaml:"mode"`
 	// Target is where the host side lives, written like a bridge's listen:
 	// an IP literal or localhost plus port, otherwise a Unix socket path
 	// (relative paths resolve against the config file's directory).
 	Target string `yaml:"target"`
+	// TLSCert and TLSKey (PEM files, both or neither) are the certificate
+	// mode: https serves. Without them the tailnet provisions one for this
+	// node's name. Either way the request reaches Target as plain HTTP.
+	TLSCert string `yaml:"tls_cert,omitempty"`
+	TLSKey  string `yaml:"tls_key,omitempty"`
 }
 
-var supportedExposeModes = map[string]bool{"tcp": true, "http": true, "udp": true}
+var supportedExposeModes = map[string]bool{"tcp": true, "http": true, "https": true, "udp": true}
 
 func normalizeExpose(e *ExposeConfig) {
 	e.Mode = strings.ToLower(strings.TrimSpace(e.Mode))
@@ -51,7 +61,7 @@ func validateExposeFields(e ExposeConfig) error {
 		return fmt.Errorf("expose %q: port must be between 1 and 65535", e.Name)
 	}
 	if !supportedExposeModes[e.Mode] {
-		return fmt.Errorf("expose %q has unsupported mode %q; supported modes are tcp, http, udp", e.Name, e.Mode)
+		return fmt.Errorf("expose %q has unsupported mode %q; supported modes are tcp, http, https, udp", e.Name, e.Mode)
 	}
 	if e.Target == "" {
 		return fmt.Errorf("expose %q is missing required field 'target'", e.Name)
@@ -67,6 +77,12 @@ func validateExposeFields(e ExposeConfig) error {
 		if !isBindHost(host) {
 			return fmt.Errorf("expose %q: target %q must be an IP literal or localhost, then a port (e.g. 127.0.0.1:%s)", e.Name, e.Target, port)
 		}
+	}
+	if e.Mode != "https" && (e.TLSCert != "" || e.TLSKey != "") {
+		return fmt.Errorf("expose %q sets tls_cert/tls_key, but those only apply to mode: https (entry is mode: %s)", e.Name, e.Mode)
+	}
+	if (e.TLSCert == "") != (e.TLSKey == "") {
+		return fmt.Errorf("expose %q: tls_cert and tls_key must be set together", e.Name)
 	}
 	return nil
 }
@@ -102,6 +118,8 @@ type tailnetListen struct {
 	// IP is the node's own tailnet address; tsnet's ListenPacket, unlike
 	// Listen, needs one spelled out.
 	IP netip.Addr
+	// ListenTLS listens with a certificate the tailnet provisions.
+	ListenTLS func(network, addr string) (net.Listener, error)
 }
 
 // localDialer dials a fixed local address whatever the bridge machinery
@@ -136,11 +154,87 @@ func startExpose(ctx context.Context, tn tailnetListen, e ExposeConfig, fatal ch
 			return nil, fmt.Errorf("expose %s: listening on tailnet udp %d: %w", e.Name, e.Port, err)
 		}
 		return serveUDP(ctx, dial, b, pc, udpSessionIdleTimeout, fatal), nil
-	default: // tcp and http both accept a stream on the tailnet port
-		l, err := tn.Listen("tcp", ":"+strconv.Itoa(e.Port))
-		if err != nil {
-			return nil, fmt.Errorf("expose %s: listening on tailnet tcp %d: %w", e.Name, e.Port, err)
-		}
-		return startListener(ctx, dial, b, l, fatal), nil
 	}
+
+	var l net.Listener
+	var err error
+	switch {
+	case e.Mode == "https" && e.TLSCert != "":
+		cr, cerr := newCertReloader(e.TLSCert, e.TLSKey)
+		if cerr != nil {
+			return nil, fmt.Errorf("expose %s: %w", e.Name, cerr)
+		}
+		l, err = tn.Listen("tcp", ":"+strconv.Itoa(e.Port))
+		if err == nil {
+			l = tls.NewListener(l, &tls.Config{GetCertificate: cr.get, NextProtos: []string{"h2", "http/1.1"}})
+		}
+	case e.Mode == "https":
+		l, err = tn.ListenTLS("tcp", ":"+strconv.Itoa(e.Port))
+	default: // tcp and http
+		l, err = tn.Listen("tcp", ":"+strconv.Itoa(e.Port))
+	}
+	if err != nil {
+		return nil, fmt.Errorf("expose %s: listening on tailnet tcp %d: %w", e.Name, e.Port, err)
+	}
+	if e.Mode == "https" {
+		b.Mode = "http" // TLS is already terminated on l
+	}
+	return startListener(ctx, dial, b, l, fatal), nil
+}
+
+// certReloader serves a certificate from disk and picks up a replaced
+// file pair on the next handshake (a renewal needs no restart). A pair that
+// fails to load keeps the previous certificate in service.
+type certReloader struct {
+	certFile, keyFile string
+
+	mu      sync.Mutex
+	cert    *tls.Certificate
+	modCert time.Time
+	modKey  time.Time
+}
+
+func newCertReloader(certFile, keyFile string) (*certReloader, error) {
+	r := &certReloader{certFile: certFile, keyFile: keyFile}
+	if err := r.load(); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+// load reads the pair and records the mtimes it saw. Caller holds mu (or
+// is the constructor).
+func (r *certReloader) load() error {
+	ci, err := os.Stat(r.certFile)
+	if err != nil {
+		return err
+	}
+	ki, err := os.Stat(r.keyFile)
+	if err != nil {
+		return err
+	}
+	c, err := tls.LoadX509KeyPair(r.certFile, r.keyFile)
+	if err != nil {
+		return fmt.Errorf("loading tls_cert/tls_key: %w", err)
+	}
+	r.cert, r.modCert, r.modKey = &c, ci.ModTime(), ki.ModTime()
+	return nil
+}
+
+func (r *certReloader) get(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ci, cerr := os.Stat(r.certFile)
+	ki, kerr := os.Stat(r.keyFile)
+	if cerr == nil && kerr == nil && (!ci.ModTime().Equal(r.modCert) || !ki.ModTime().Equal(r.modKey)) {
+		if err := r.load(); err != nil {
+			// Remember these mtimes so a half-written pair is retried
+			// when it changes again, not on every handshake.
+			r.modCert, r.modKey = ci.ModTime(), ki.ModTime()
+			log.Printf("tls: keeping the previous certificate, reload failed: %v", err)
+		} else {
+			log.Printf("tls: reloaded %s", r.certFile)
+		}
+	}
+	return r.cert, nil
 }

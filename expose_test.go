@@ -2,7 +2,15 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/netip"
@@ -249,6 +257,10 @@ func TestCheckExpose(t *testing.T) {
 		{"port zero", []ExposeConfig{with(func(e *ExposeConfig) { e.Port = 0 })}, "port"},
 		{"port too big", []ExposeConfig{with(func(e *ExposeConfig) { e.Port = 70000 })}, "port"},
 		{"valid http to socket", []ExposeConfig{with(func(e *ExposeConfig) { e.Mode = "http"; e.Target = "/run/a.sock" })}, ""},
+		{"valid https, tailnet cert", []ExposeConfig{with(func(e *ExposeConfig) { e.Mode = "https" })}, ""},
+		{"valid https, own cert", []ExposeConfig{with(func(e *ExposeConfig) { e.Mode = "https"; e.TLSCert = "c"; e.TLSKey = "k" })}, ""},
+		{"cert without key", []ExposeConfig{with(func(e *ExposeConfig) { e.Mode = "https"; e.TLSCert = "c" })}, "together"},
+		{"cert on http", []ExposeConfig{with(func(e *ExposeConfig) { e.Mode = "http"; e.TLSCert = "c"; e.TLSKey = "k" })}, "only apply to mode: https"},
 		{"bad mode", []ExposeConfig{with(func(e *ExposeConfig) { e.Mode = "icmp" })}, "unsupported mode"},
 		{"missing target", []ExposeConfig{with(func(e *ExposeConfig) { e.Target = "" })}, "target"},
 		{"udp target is a path", []ExposeConfig{with(func(e *ExposeConfig) { e.Mode = "udp"; e.Target = "/run/a.sock" })}, "host:port"},
@@ -304,5 +316,132 @@ expose:
 	}
 	if cfg.Expose[1].Target != "127.0.0.1:5353" {
 		t.Errorf("host:port target changed: %q", cfg.Expose[1].Target)
+	}
+}
+
+// writeCert writes a self-signed certificate for commonName to dir and
+// returns the file paths.
+func writeCert(t *testing.T, dir, commonName string) (certFile, keyFile string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: commonName},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		IPAddresses:  []net.IP{net.IPv4(127, 0, 0, 1)},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	certFile, keyFile = filepath.Join(dir, "cert.pem"), filepath.Join(dir, "key.pem")
+	os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600)
+	os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}), 0o600)
+	return certFile, keyFile
+}
+
+// servedCN returns the common name of the certificate addr presents.
+func servedCN(t *testing.T, addr string) string {
+	t.Helper()
+	c, err := tls.Dial("tcp", addr, &tls.Config{InsecureSkipVerify: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	return c.ConnectionState().PeerCertificates[0].Subject.CommonName
+}
+
+func TestExpose_HTTPSWithCertificateFiles(t *testing.T) {
+	backend, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotTLS bool
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotTLS = r.TLS != nil
+		io.WriteString(w, "secure hello")
+	})}
+	go srv.Serve(backend)
+	defer srv.Close()
+
+	dir := t.TempDir()
+	certFile, keyFile := writeCert(t, dir, "first")
+	lt := newLoopbackTailnet()
+	rb, err := startExpose(context.Background(), lt.tailnetListen, ExposeConfig{
+		Name: "site", Port: 443, Mode: "https", Target: backend.Addr().String(),
+		TLSCert: certFile, TLSKey: keyFile,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer shutdownNow(rb)
+
+	client := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+	resp, err := client.Get("https://" + lt.tcp.Addr().String() + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != "secure hello" || gotTLS {
+		t.Errorf("body %q, backend saw TLS=%v (want plain HTTP to the backend)", body, gotTLS)
+	}
+
+	// A renewed pair is served without a restart.
+	if cn := servedCN(t, lt.tcp.Addr().String()); cn != "first" {
+		t.Fatalf("cn = %q", cn)
+	}
+	writeCert(t, dir, "second")
+	future := time.Now().Add(time.Minute)
+	os.Chtimes(certFile, future, future)
+	os.Chtimes(keyFile, future, future)
+	if cn := servedCN(t, lt.tcp.Addr().String()); cn != "second" {
+		t.Errorf("after renewal cn = %q, want second", cn)
+	}
+
+	// A broken replacement keeps the previous certificate in service.
+	os.WriteFile(certFile, []byte("garbage"), 0o600)
+	later := future.Add(time.Minute)
+	os.Chtimes(certFile, later, later)
+	if cn := servedCN(t, lt.tcp.Addr().String()); cn != "second" {
+		t.Errorf("after bad reload cn = %q, want second", cn)
+	}
+}
+
+func TestExpose_HTTPSTailnetCertificate(t *testing.T) {
+	lt := newLoopbackTailnet()
+	var asked string
+	lt.ListenTLS = func(network, addr string) (net.Listener, error) {
+		asked = addr
+		return net.Listen("tcp", "127.0.0.1:0")
+	}
+	rb, err := startExpose(context.Background(), lt.tailnetListen, ExposeConfig{
+		Name: "site", Port: 443, Mode: "https", Target: "127.0.0.1:1",
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer shutdownNow(rb)
+	if asked != ":443" {
+		t.Errorf("ListenTLS addr = %q", asked)
+	}
+}
+
+func TestExpose_HTTPSBadCertificate(t *testing.T) {
+	lt := newLoopbackTailnet()
+	_, err := startExpose(context.Background(), lt.tailnetListen, ExposeConfig{
+		Name: "site", Port: 443, Mode: "https", Target: "127.0.0.1:1",
+		TLSCert: "/nonexistent/cert.pem", TLSKey: "/nonexistent/key.pem",
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "site") {
+		t.Errorf("err = %v", err)
 	}
 }

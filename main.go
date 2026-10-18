@@ -189,5 +189,5 @@ func tailnetListener(srv *tsnet.Server) (tailnetListen, error) {
 	if !ip.IsValid() {
 		return tailnetListen{}, errors.New("expose: node has no tailnet address")
 	}
-	return tailnetListen{Listen: srv.Listen, ListenPacket: srv.ListenPacket, IP: ip}, nil
+	return tailnetListen{Listen: srv.Listen, ListenPacket: srv.ListenPacket, ListenTLS: srv.ListenTLS, IP: ip}, nil
 }
