@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -29,10 +30,6 @@ const defaultManagementSocketMode os.FileMode = 0600
 // defaultBridgeMode is used when a bridge doesn't set mode:.
 const defaultBridgeMode = "tcp"
 
-// managedBridgesFileName is the state_dir file the management API
-// persists its own bridges to -- see manage.go.
-const managedBridgesFileName = "managed-bridges.yaml"
-
 // supportedBridgeModes are the values checkBridges accepts for mode:.
 var supportedBridgeModes = map[string]bool{
 	"tcp":  true, // raw bidirectional byte copy
@@ -40,10 +37,8 @@ var supportedBridgeModes = map[string]bool{
 	"udp":  true, // relay datagrams; listen is a UDP bind address (host:port)
 }
 
-// BridgeConfig is one listen-socket -> tailnet-target mapping. It doubles
-// as the management API's JSON request/response body and the schema of
-// managed-bridges.yaml (see manage.go) -- both are "just another bridges:
-// list" in the same shape as config.yaml's.
+// BridgeConfig is one listen-socket -> tailnet-target mapping, the schema
+// of an entry in config.yaml's bridges: list.
 type BridgeConfig struct {
 	Name string `yaml:"name" json:"name"`
 	// Listen is a Unix socket path, or a host:port to accept on a TCP port
@@ -112,12 +107,6 @@ func (t *Targets) UnmarshalYAML(n *yaml.Node) error {
 func (t *Targets) UnmarshalJSON(data []byte) error {
 	if string(data) == "null" {
 		return nil // by convention, null is a no-op
-	}
-	var s string
-	if err := json.Unmarshal(data, &s); err == nil {
-		log.Printf("warning: 'target' given as a string is deprecated; use a list: [%q]", s)
-		*t = Targets{s}
-		return nil
 	}
 	var l []string
 	if err := json.Unmarshal(data, &l); err != nil {
@@ -219,9 +208,6 @@ func LoadConfig(path string) (*Config, error) {
 			return nil, fmt.Errorf("management_socket_group is set but management_socket_mode is not: "+
 				"the default %#o gives the group no access -- set a mode that does, e.g. \"0660\"", defaultManagementSocketMode)
 		}
-		if stateDir == "" {
-			return nil, fmt.Errorf("management_socket requires state_dir to be set -- it's where managed bridges (%s) are persisted", managedBridgesFileName)
-		}
 		for _, b := range bridges {
 			if b.Listen == managementSocket {
 				return nil, fmt.Errorf("management_socket %q collides with bridge %q's listen path", managementSocket, b.Name)
@@ -287,14 +273,27 @@ func readRawConfig(path string) (*rawConfig, error) {
 	return &cfg, nil
 }
 
+// bridgeNameRE is the set of characters a bridge name may contain. Names
+// appear in log lines and in the management API's /bridges/{name} URLs, so
+// restricting them means nothing there ever needs escaping.
+var bridgeNameRE = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
+// validBridgeName also rejects "." and "..", which are path segments in a
+// URL rather than names.
+func validBridgeName(name string) bool {
+	return bridgeNameRE.MatchString(name) && strings.Trim(name, ".") != ""
+}
+
 // validateBridgeFields checks one bridge's own fields in isolation --
 // required fields present, mode supported, rewrite_host only where it
 // applies. It doesn't know about any other bridge, so duplicate name/listen
-// checks live in checkBridges (the static list) and bridgeManager.Add (a
-// single new bridge against whatever's currently running) instead.
+// checks live in checkBridges.
 func validateBridgeFields(b BridgeConfig) error {
 	if b.Name == "" {
 		return fmt.Errorf("a bridge is missing required field 'name'")
+	}
+	if !validBridgeName(b.Name) {
+		return fmt.Errorf("bridge name %q is invalid: use only letters, digits, '_', '.' and '-' (and not just dots)", b.Name)
 	}
 	if b.Listen == "" {
 		return fmt.Errorf("bridge %q is missing required field 'listen'", b.Name)
@@ -370,10 +369,7 @@ func checkBridges(bridges []BridgeConfig) error {
 
 // normalizeBridge lowercases/trims Mode (filling in the default when
 // empty) and resolves Enabled to a concrete, always-non-nil pointer
-// (defaulting to true when omitted). Applied uniformly to a bridge
-// however it was sourced -- config.yaml, managed-bridges.yaml, or a
-// management API request -- so all three accept the same shorthand
-// (mode:/enabled: omitted) and end up with the same normalized shape.
+// (defaulting to true when omitted), so a bridge can omit mode:/enabled:.
 func normalizeBridge(b *BridgeConfig) {
 	b.Mode = strings.ToLower(strings.TrimSpace(b.Mode))
 	if b.Mode == "" {

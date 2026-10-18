@@ -11,7 +11,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -110,11 +109,7 @@ func run() error {
 		return fmt.Errorf("getting local client: %w", err)
 	}
 
-	statePath := ""
-	if cfg.StateDir != "" {
-		statePath = filepath.Join(cfg.StateDir, managedBridgesFileName)
-	}
-	manager := newBridgeManager(ctx, srv.Dial, cfg.SocketMode, cfg.SocketGroup, statePath, cfg.ManagementSocket, lc.StatusWithoutPeers)
+	manager := newBridgeManager(ctx, srv.Dial, cfg.SocketMode, cfg.SocketGroup, lc.StatusWithoutPeers)
 	started, attempted, err := manager.startAll(cfg.Bridges)
 	if err != nil {
 		return err
@@ -122,7 +117,7 @@ func run() error {
 
 	log.Printf("running %d/%d bridge(s):", started, attempted)
 	for _, b := range manager.List() {
-		log.Printf("  - %s [%s/%s]: %s -> %s", b.Name, b.Mode, b.Source, b.Listen, strings.Join(b.Target, ", "))
+		log.Printf("  - %s [%s]: %s -> %s", b.Name, b.Mode, b.Listen, strings.Join(b.Target, ", "))
 	}
 
 	// Only fatal if bridges were actually attempted and none survived --
@@ -149,16 +144,8 @@ func run() error {
 
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), shutdownDrainTimeout)
 	defer cancelShutdown()
-	// The management socket is shut down first, and fully -- not
-	// concurrently with the bridges -- so no new POST/DELETE can be
-	// accepted (or still be in a handler) once bridges start being torn
-	// down. http.Server.Shutdown already blocks until in-flight
-	// requests finish and no new ones are accepted, so this ordering
-	// alone is enough: a request that raced a concurrent shutdown could
-	// otherwise start a new bridge after manager.Shutdown had already
-	// taken its snapshot of what to persist, and have that bridge's own
-	// Add rewrite managed-bridges.yaml with only itself in it, wiping
-	// every other managed bridge from the file.
+	// The management socket goes first so no request is in a handler while
+	// bridges are being torn down.
 	if mgmt != nil {
 		mgmt.Shutdown(shutdownCtx)
 	}
