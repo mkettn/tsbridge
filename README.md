@@ -11,9 +11,13 @@ Typical use: a reverse proxy or app server on a box that shouldn't be a
 full tailnet member connects to `/run/tsbridge/my-service.sock` instead of
 directly to `remote-machine:1234` on the tailnet.
 
+It also works the other way round: `expose:` entries accept traffic on a
+port of this node's tailnet address and forward it to a Unix socket or a
+TCP/UDP port on the host (see [Exposing host services](#exposing-host-services-to-the-tailnet)).
+
 ## Contents
 
-- `main.go`, `config.go`, `bridge.go`, `manage.go` — the `tsbridge` binary
+- `main.go`, `config.go`, `bridge.go`, `expose.go`, `manage.go` — the `tsbridge` binary
 - `config.example.yaml` — annotated example config
 - `tsbridge.service` — systemd unit
 - `tsbridge-sysusers.conf` — `systemd-sysusers` snippet for the service user
@@ -185,10 +189,11 @@ Top-level fields in `config.yaml`:
 | `control_url`  | (Tailscale)      | Control server to register with; set for a self-hosted Headscale        |
 | `socket_group` | (unset)          | Unix group to own every bridge socket                                   |
 | `socket_mode`  | `"0660"`         | Permission bits applied to every bridge socket                          |
-| `management_socket` | (unset)    | Unix socket for the runtime bridge-management API; unset disables it    |
+| `management_socket` | (unset)    | Unix socket for the read-only status API; unset disables it    |
 | `management_socket_group` | (unset) | Unix group to own the management socket                            |
 | `management_socket_mode` | `"0600"` | Permission bits applied to the management socket                      |
 | `bridges`      | `[]`             | List of `{name, listen, target}` bridge mappings                        |
+| `expose`       | `[]`             | List of `{name, port, target}` [tailnet-port forwards](#exposing-host-services-to-the-tailnet) |
 
 Each bridge entry:
 
@@ -346,6 +351,47 @@ directory. This is mostly useful for self-contained setups (see
 [`example/`](example/)) — for a real install, prefer absolute paths so
 they don't depend on the config file's location matching
 `RuntimeDirectory=`/`StateDirectory=` by coincidence.
+
+## Exposing host services to the tailnet
+
+`bridges:` carry local clients *to* the tailnet. `expose:` goes the other
+way: traffic that reaches this node's tailnet address on a port is forwarded
+to a socket or port on the host.
+
+```yaml
+expose:
+  - name: web
+    port: 8080                      # port on this node's tailnet address
+    target: 127.0.0.1:3000          # a TCP port on the host ...
+  - name: app
+    port: 9000
+    target: /run/app/app.sock       # ... or a Unix socket
+  - name: dns
+    port: 53
+    mode: udp
+    target: 127.0.0.1:5353
+```
+
+| Field    | Meaning |
+|----------|---------|
+| `name`   | Unique identifier, same character rules as a bridge name. |
+| `port`   | 1-65535. The port is taken on the node's own tailnet address. |
+| `mode`   | `tcp` (default) or `udp`. |
+| `target` | Where the traffic goes on the host. Written like a bridge's `listen:`: an IP literal or `localhost` plus a port, otherwise a Unix socket path (relative paths resolve against the config file's directory). `mode: udp` needs a `host:port`. |
+
+- **Who can connect** is decided by your tailnet's ACLs; tsbridge adds no
+  access control of its own. Anything that can reach the port reaches the
+  target, so prefer loopback targets and narrow the ACL to the peers that
+  need it.
+- `tcp` copies bytes both ways (one tailnet connection per host connection).
+  `udp` relays datagrams, with one host-side socket per tailnet client that
+  idles out after 60 seconds, as for UDP bridges. UDP listens on the node's
+  IPv4 tailnet address (IPv6 if it has none).
+- Target hostnames are not resolved: `example.com:80` would be read as a
+  Unix socket path. Use an IP literal or `localhost`.
+- A port that cannot be opened (for example one already in use) stops
+  tsbridge at startup. Exposed ports are not shown by the management API.
+- There is one target per entry (no round robin), and no `http` mode.
 
 ## Management API (read-only)
 
