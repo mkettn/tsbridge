@@ -36,7 +36,7 @@ ephemeral: true
 # it thinks about socket_group.
 management_socket: tsbridge-example-control.sock
 
-bridges:
+outbound:
   - name: example-service
     # Relative -> example/tsbridge-example.sock (matches Caddyfile).
     listen: tsbridge-example.sock

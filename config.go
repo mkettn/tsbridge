@@ -38,7 +38,7 @@ var supportedBridgeModes = map[string]bool{
 }
 
 // BridgeConfig is one listen-socket -> tailnet-target mapping, the schema
-// of an entry in config.yaml's bridges: list.
+// of an entry in config.yaml's outbound: list (formerly bridges:).
 type BridgeConfig struct {
 	Name string `yaml:"name" json:"name"`
 	// Listen is a Unix socket path, or a host:port to accept on a TCP port
@@ -78,7 +78,7 @@ type BridgeConfig struct {
 
 	// forwardProto makes an http proxy set X-Forwarded-Proto from the scheme
 	// the client used and drop the client's own Forwarded, X-Forwarded-Proto
-	// and X-Forwarded-Host. Not configurable: expose sets it, since its
+	// and X-Forwarded-Host. Not configurable: inbound sets it, since its
 	// backend can't otherwise tell http from https.
 	forwardProto bool
 }
@@ -149,7 +149,7 @@ type Config struct {
 	ManagementSocketGroup string
 	ManagementSocketMode  os.FileMode
 	Bridges               []BridgeConfig
-	Expose                []ExposeConfig
+	Inbound               []InboundConfig
 }
 
 // rawConfig mirrors the config.yaml schema.
@@ -163,8 +163,10 @@ type rawConfig struct {
 	ManagementSocket      string         `yaml:"management_socket"`
 	ManagementSocketGroup string         `yaml:"management_socket_group"`
 	ManagementSocketMode  string         `yaml:"management_socket_mode"`
-	Bridges               []BridgeConfig `yaml:"bridges"`
-	Expose                []ExposeConfig `yaml:"expose"`
+	Outbound              []BridgeConfig `yaml:"outbound"`
+	// LegacyBridges is outbound's former name, still accepted with a warning.
+	LegacyBridges []BridgeConfig  `yaml:"bridges"`
+	Inbound       []InboundConfig `yaml:"inbound"`
 }
 
 // LoadConfig reads and validates the config file at path. Any error
@@ -176,7 +178,14 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	baseDir := filepath.Dir(path)
-	bridges := raw.Bridges
+	bridges := raw.Outbound
+	if raw.LegacyBridges != nil {
+		if raw.Outbound != nil {
+			return nil, fmt.Errorf("loading %s: 'bridges' is the old name of 'outbound'; set only 'outbound'", path)
+		}
+		log.Print("warning: 'bridges' is deprecated; rename it to 'outbound'")
+		bridges = raw.LegacyBridges
+	}
 	for i := range bridges {
 		normalizeBridge(&bridges[i])
 		if !isNetworkListen(bridges[i]) {
@@ -188,16 +197,16 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, err
 	}
 
-	expose := raw.Expose
-	for i := range expose {
-		normalizeExpose(&expose[i])
-		if n, _ := parseEndpoint(expose[i].Mode, expose[i].Target); n == "unix" {
-			expose[i].Target = resolvePath(baseDir, expose[i].Target)
+	inbound := raw.Inbound
+	for i := range inbound {
+		normalizeInbound(&inbound[i])
+		if n, _ := parseEndpoint(inbound[i].Mode, inbound[i].Target); n == "unix" {
+			inbound[i].Target = resolvePath(baseDir, inbound[i].Target)
 		}
-		expose[i].TLSCert = resolvePath(baseDir, expose[i].TLSCert)
-		expose[i].TLSKey = resolvePath(baseDir, expose[i].TLSKey)
+		inbound[i].TLSCert = resolvePath(baseDir, inbound[i].TLSCert)
+		inbound[i].TLSKey = resolvePath(baseDir, inbound[i].TLSKey)
 	}
-	if err := checkExpose(expose, bridges); err != nil {
+	if err := checkInbound(inbound, bridges); err != nil {
 		return nil, err
 	}
 
@@ -267,7 +276,7 @@ func LoadConfig(path string) (*Config, error) {
 		ManagementSocketGroup: raw.ManagementSocketGroup,
 		ManagementSocketMode:  managementMode,
 		Bridges:               bridges,
-		Expose:                expose,
+		Inbound:               inbound,
 	}, nil
 }
 
@@ -444,7 +453,7 @@ func parseListen(b BridgeConfig) (network, addr string) {
 	return parseEndpoint(b.Mode, b.Listen)
 }
 
-// parseEndpoint is parseListen's rule, shared with expose: targets (the
+// parseEndpoint is parseListen's rule, shared with inbound: targets (the
 // local address a tailnet port forwards to), for any mode and address string.
 func parseEndpoint(mode, listen string) (network, addr string) {
 	if mode == "udp" {

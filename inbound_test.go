@@ -28,7 +28,7 @@ type loopbackTailnet struct {
 	tailnetListen
 	tcp net.Listener
 	udp net.PacketConn
-	// gotNetwork/gotAddr are what startExpose asked the node to listen on.
+	// gotNetwork/gotAddr are what startInbound asked the node to listen on.
 	gotAddr string
 }
 
@@ -85,7 +85,7 @@ func roundTrip(t *testing.T, network, addr, msg string) string {
 	return string(buf)
 }
 
-func TestExpose_TCPToTCP(t *testing.T) {
+func TestInbound_TCPToTCP(t *testing.T) {
 	backend, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -94,7 +94,7 @@ func TestExpose_TCPToTCP(t *testing.T) {
 	go tcpEcho(backend)
 
 	lt := newLoopbackTailnet()
-	rb, err := startExpose(context.Background(), lt.tailnetListen, ExposeConfig{
+	rb, err := startInbound(context.Background(), lt.tailnetListen, InboundConfig{
 		Name: "web", Port: 8080, Mode: "tcp", Target: backend.Addr().String(),
 	}, nil)
 	if err != nil {
@@ -110,7 +110,7 @@ func TestExpose_TCPToTCP(t *testing.T) {
 	}
 }
 
-func TestExpose_TCPToUnixSocket(t *testing.T) {
+func TestInbound_TCPToUnixSocket(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "svc.sock")
 	backend, err := net.Listen("unix", path)
 	if err != nil {
@@ -120,7 +120,7 @@ func TestExpose_TCPToUnixSocket(t *testing.T) {
 	go tcpEcho(backend)
 
 	lt := newLoopbackTailnet()
-	rb, err := startExpose(context.Background(), lt.tailnetListen, ExposeConfig{
+	rb, err := startInbound(context.Background(), lt.tailnetListen, InboundConfig{
 		Name: "svc", Port: 9000, Mode: "tcp", Target: path,
 	}, nil)
 	if err != nil {
@@ -133,7 +133,7 @@ func TestExpose_TCPToUnixSocket(t *testing.T) {
 	}
 }
 
-func TestExpose_HTTP(t *testing.T) {
+func TestInbound_HTTP(t *testing.T) {
 	for _, unix := range []bool{false, true} {
 		name := "tcp target"
 		if unix {
@@ -158,7 +158,7 @@ func TestExpose_HTTP(t *testing.T) {
 			defer srv.Close()
 
 			lt := newLoopbackTailnet()
-			rb, err := startExpose(context.Background(), lt.tailnetListen, ExposeConfig{
+			rb, err := startInbound(context.Background(), lt.tailnetListen, InboundConfig{
 				Name: "app", Port: 8080, Mode: "http", Target: backend.Addr().String(),
 			}, nil)
 			if err != nil {
@@ -195,7 +195,7 @@ func TestExpose_HTTP(t *testing.T) {
 	}
 }
 
-func TestExpose_UDP(t *testing.T) {
+func TestInbound_UDP(t *testing.T) {
 	backend, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -213,7 +213,7 @@ func TestExpose_UDP(t *testing.T) {
 	}()
 
 	lt := newLoopbackTailnet()
-	rb, err := startExpose(context.Background(), lt.tailnetListen, ExposeConfig{
+	rb, err := startInbound(context.Background(), lt.tailnetListen, InboundConfig{
 		Name: "dns", Port: 5353, Mode: "udp", Target: backend.LocalAddr().String(),
 	}, nil)
 	if err != nil {
@@ -229,10 +229,10 @@ func TestExpose_UDP(t *testing.T) {
 	}
 }
 
-func TestExpose_UDPNeedsTailnetIP(t *testing.T) {
+func TestInbound_UDPNeedsTailnetIP(t *testing.T) {
 	lt := newLoopbackTailnet()
 	lt.IP = netip.Addr{}
-	_, err := startExpose(context.Background(), lt.tailnetListen, ExposeConfig{
+	_, err := startInbound(context.Background(), lt.tailnetListen, InboundConfig{
 		Name: "dns", Port: 53, Mode: "udp", Target: "127.0.0.1:53",
 	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "no tailnet address") {
@@ -240,10 +240,10 @@ func TestExpose_UDPNeedsTailnetIP(t *testing.T) {
 	}
 }
 
-func TestExpose_ListenError(t *testing.T) {
+func TestInbound_ListenError(t *testing.T) {
 	lt := newLoopbackTailnet()
 	lt.Listen = func(string, string) (net.Listener, error) { return nil, io.ErrClosedPipe }
-	_, err := startExpose(context.Background(), lt.tailnetListen, ExposeConfig{
+	_, err := startInbound(context.Background(), lt.tailnetListen, InboundConfig{
 		Name: "web", Port: 80, Mode: "tcp", Target: "127.0.0.1:80",
 	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "web") {
@@ -251,43 +251,43 @@ func TestExpose_ListenError(t *testing.T) {
 	}
 }
 
-func TestCheckExpose(t *testing.T) {
-	ok := ExposeConfig{Name: "a", Port: 80, Mode: "tcp", Target: "127.0.0.1:8080"}
-	with := func(f func(*ExposeConfig)) ExposeConfig { e := ok; f(&e); return e }
+func TestCheckInbound(t *testing.T) {
+	ok := InboundConfig{Name: "a", Port: 80, Mode: "tcp", Target: "127.0.0.1:8080"}
+	with := func(f func(*InboundConfig)) InboundConfig { e := ok; f(&e); return e }
 	tests := []struct {
 		name string
-		list []ExposeConfig
+		list []InboundConfig
 		want string // substring of the error, "" for valid
 	}{
-		{"valid tcp host:port", []ExposeConfig{ok}, ""},
-		{"valid unix socket", []ExposeConfig{with(func(e *ExposeConfig) { e.Target = "/run/a.sock" })}, ""},
-		{"valid udp", []ExposeConfig{with(func(e *ExposeConfig) { e.Mode = "udp" })}, ""},
-		{"same port, different protocol", []ExposeConfig{ok, with(func(e *ExposeConfig) { e.Name = "b"; e.Mode = "udp" })}, ""},
-		{"missing name", []ExposeConfig{with(func(e *ExposeConfig) { e.Name = "" })}, "name"},
-		{"bad name", []ExposeConfig{with(func(e *ExposeConfig) { e.Name = "a b" })}, "invalid"},
-		{"port zero", []ExposeConfig{with(func(e *ExposeConfig) { e.Port = 0 })}, "port"},
-		{"port too big", []ExposeConfig{with(func(e *ExposeConfig) { e.Port = 70000 })}, "port"},
-		{"valid http to socket", []ExposeConfig{with(func(e *ExposeConfig) { e.Mode = "http"; e.Target = "/run/a.sock" })}, ""},
-		{"valid https, tailnet cert", []ExposeConfig{with(func(e *ExposeConfig) { e.Mode = "https" })}, ""},
-		{"valid https, own cert", []ExposeConfig{with(func(e *ExposeConfig) { e.Mode = "https"; e.TLSCert = "c"; e.TLSKey = "k" })}, ""},
-		{"cert without key", []ExposeConfig{with(func(e *ExposeConfig) { e.Mode = "https"; e.TLSCert = "c" })}, "together"},
-		{"cert on http", []ExposeConfig{with(func(e *ExposeConfig) { e.Mode = "http"; e.TLSCert = "c"; e.TLSKey = "k" })}, "only apply to mode: https"},
-		{"bad mode", []ExposeConfig{with(func(e *ExposeConfig) { e.Mode = "icmp" })}, "unsupported mode"},
-		{"missing target", []ExposeConfig{with(func(e *ExposeConfig) { e.Target = "" })}, "target"},
-		{"udp target is a path", []ExposeConfig{with(func(e *ExposeConfig) { e.Mode = "udp"; e.Target = "/run/a.sock" })}, "host:port"},
-		{"target port zero", []ExposeConfig{with(func(e *ExposeConfig) { e.Target = "127.0.0.1:0" })}, "invalid port"},
-		{"duplicate name", []ExposeConfig{ok, with(func(e *ExposeConfig) { e.Port = 81 })}, "duplicate name"},
-		{"tcp and https share a port", []ExposeConfig{ok, with(func(e *ExposeConfig) { e.Name = "b"; e.Mode = "https" })}, "duplicate expose port 80 on tcp"},
-		{"http and https share a port", []ExposeConfig{with(func(e *ExposeConfig) { e.Mode = "http" }), with(func(e *ExposeConfig) { e.Name = "b"; e.Mode = "https" })}, "duplicate expose port"},
-		{"duplicate port", []ExposeConfig{ok, with(func(e *ExposeConfig) { e.Name = "b" })}, "duplicate expose port"},
+		{"valid tcp host:port", []InboundConfig{ok}, ""},
+		{"valid unix socket", []InboundConfig{with(func(e *InboundConfig) { e.Target = "/run/a.sock" })}, ""},
+		{"valid udp", []InboundConfig{with(func(e *InboundConfig) { e.Mode = "udp" })}, ""},
+		{"same port, different protocol", []InboundConfig{ok, with(func(e *InboundConfig) { e.Name = "b"; e.Mode = "udp" })}, ""},
+		{"missing name", []InboundConfig{with(func(e *InboundConfig) { e.Name = "" })}, "name"},
+		{"bad name", []InboundConfig{with(func(e *InboundConfig) { e.Name = "a b" })}, "invalid"},
+		{"port zero", []InboundConfig{with(func(e *InboundConfig) { e.Port = 0 })}, "port"},
+		{"port too big", []InboundConfig{with(func(e *InboundConfig) { e.Port = 70000 })}, "port"},
+		{"valid http to socket", []InboundConfig{with(func(e *InboundConfig) { e.Mode = "http"; e.Target = "/run/a.sock" })}, ""},
+		{"valid https, tailnet cert", []InboundConfig{with(func(e *InboundConfig) { e.Mode = "https" })}, ""},
+		{"valid https, own cert", []InboundConfig{with(func(e *InboundConfig) { e.Mode = "https"; e.TLSCert = "c"; e.TLSKey = "k" })}, ""},
+		{"cert without key", []InboundConfig{with(func(e *InboundConfig) { e.Mode = "https"; e.TLSCert = "c" })}, "together"},
+		{"cert on http", []InboundConfig{with(func(e *InboundConfig) { e.Mode = "http"; e.TLSCert = "c"; e.TLSKey = "k" })}, "only apply to mode: https"},
+		{"bad mode", []InboundConfig{with(func(e *InboundConfig) { e.Mode = "icmp" })}, "unsupported mode"},
+		{"missing target", []InboundConfig{with(func(e *InboundConfig) { e.Target = "" })}, "target"},
+		{"udp target is a path", []InboundConfig{with(func(e *InboundConfig) { e.Mode = "udp"; e.Target = "/run/a.sock" })}, "host:port"},
+		{"target port zero", []InboundConfig{with(func(e *InboundConfig) { e.Target = "127.0.0.1:0" })}, "invalid port"},
+		{"duplicate name", []InboundConfig{ok, with(func(e *InboundConfig) { e.Port = 81 })}, "duplicate name"},
+		{"tcp and https share a port", []InboundConfig{ok, with(func(e *InboundConfig) { e.Name = "b"; e.Mode = "https" })}, "duplicate inbound port 80 on tcp"},
+		{"http and https share a port", []InboundConfig{with(func(e *InboundConfig) { e.Mode = "http" }), with(func(e *InboundConfig) { e.Name = "b"; e.Mode = "https" })}, "duplicate inbound port"},
+		{"duplicate port", []InboundConfig{ok, with(func(e *InboundConfig) { e.Name = "b" })}, "duplicate inbound port"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			list := append([]ExposeConfig(nil), tt.list...)
+			list := append([]InboundConfig(nil), tt.list...)
 			for i := range list {
-				normalizeExpose(&list[i])
+				normalizeInbound(&list[i])
 			}
-			err := checkExpose(list, nil)
+			err := checkInbound(list, nil)
 			switch {
 			case tt.want == "" && err != nil:
 				t.Errorf("unexpected error: %v", err)
@@ -298,11 +298,11 @@ func TestCheckExpose(t *testing.T) {
 	}
 }
 
-func TestLoadConfig_Expose(t *testing.T) {
+func TestLoadConfig_Inbound(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
 	yaml := `
-expose:
+inbound:
   - name: web
     port: 8080
     target: run/web.sock
@@ -318,17 +318,17 @@ expose:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Expose) != 2 {
-		t.Fatalf("expose = %+v", cfg.Expose)
+	if len(cfg.Inbound) != 2 {
+		t.Fatalf("inbound = %+v", cfg.Inbound)
 	}
-	if got, want := cfg.Expose[0].Target, filepath.Join(dir, "run/web.sock"); got != want {
+	if got, want := cfg.Inbound[0].Target, filepath.Join(dir, "run/web.sock"); got != want {
 		t.Errorf("relative socket target = %q, want %q", got, want)
 	}
-	if cfg.Expose[0].Mode != "tcp" || cfg.Expose[1].Mode != "udp" {
-		t.Errorf("modes = %q, %q", cfg.Expose[0].Mode, cfg.Expose[1].Mode)
+	if cfg.Inbound[0].Mode != "tcp" || cfg.Inbound[1].Mode != "udp" {
+		t.Errorf("modes = %q, %q", cfg.Inbound[0].Mode, cfg.Inbound[1].Mode)
 	}
-	if cfg.Expose[1].Target != "127.0.0.1:5353" {
-		t.Errorf("host:port target changed: %q", cfg.Expose[1].Target)
+	if cfg.Inbound[1].Target != "127.0.0.1:5353" {
+		t.Errorf("host:port target changed: %q", cfg.Inbound[1].Target)
 	}
 }
 
@@ -372,7 +372,7 @@ func servedCN(t *testing.T, addr string) string {
 	return c.ConnectionState().PeerCertificates[0].Subject.CommonName
 }
 
-func TestExpose_HTTPSWithCertificateFiles(t *testing.T) {
+func TestInbound_HTTPSWithCertificateFiles(t *testing.T) {
 	backend, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -389,7 +389,7 @@ func TestExpose_HTTPSWithCertificateFiles(t *testing.T) {
 	dir := t.TempDir()
 	certFile, keyFile := writeCert(t, dir, "first")
 	lt := newLoopbackTailnet()
-	rb, err := startExpose(context.Background(), lt.tailnetListen, ExposeConfig{
+	rb, err := startInbound(context.Background(), lt.tailnetListen, InboundConfig{
 		Name: "site", Port: 443, Mode: "https", Target: backend.Addr().String(),
 		TLSCert: certFile, TLSKey: keyFile,
 	}, nil)
@@ -433,14 +433,14 @@ func TestExpose_HTTPSWithCertificateFiles(t *testing.T) {
 	}
 }
 
-func TestExpose_HTTPSTailnetCertificate(t *testing.T) {
+func TestInbound_HTTPSTailnetCertificate(t *testing.T) {
 	lt := newLoopbackTailnet()
 	var asked string
 	lt.ListenTLS = func(network, addr string) (net.Listener, error) {
 		asked = addr
 		return net.Listen("tcp", "127.0.0.1:0")
 	}
-	rb, err := startExpose(context.Background(), lt.tailnetListen, ExposeConfig{
+	rb, err := startInbound(context.Background(), lt.tailnetListen, InboundConfig{
 		Name: "site", Port: 443, Mode: "https", Target: "127.0.0.1:1",
 	}, nil)
 	if err != nil {
@@ -452,9 +452,9 @@ func TestExpose_HTTPSTailnetCertificate(t *testing.T) {
 	}
 }
 
-func TestExpose_HTTPSBadCertificate(t *testing.T) {
+func TestInbound_HTTPSBadCertificate(t *testing.T) {
 	lt := newLoopbackTailnet()
-	_, err := startExpose(context.Background(), lt.tailnetListen, ExposeConfig{
+	_, err := startInbound(context.Background(), lt.tailnetListen, InboundConfig{
 		Name: "site", Port: 443, Mode: "https", Target: "127.0.0.1:1",
 		TLSCert: "/nonexistent/cert.pem", TLSKey: "/nonexistent/key.pem",
 	}, nil)
@@ -463,13 +463,13 @@ func TestExpose_HTTPSBadCertificate(t *testing.T) {
 	}
 }
 
-func TestCheckExpose_NameCollidesWithBridge(t *testing.T) {
-	list := []ExposeConfig{{Name: "web", Port: 80, Mode: "tcp", Target: "127.0.0.1:8080"}}
-	err := checkExpose(list, []BridgeConfig{{Name: "web"}})
+func TestCheckInbound_NameCollidesWithBridge(t *testing.T) {
+	list := []InboundConfig{{Name: "web", Port: 80, Mode: "tcp", Target: "127.0.0.1:8080"}}
+	err := checkInbound(list, []BridgeConfig{{Name: "web"}})
 	if err == nil || !strings.Contains(err.Error(), "duplicate name") {
 		t.Errorf("err = %v", err)
 	}
-	if err := checkExpose(list, []BridgeConfig{{Name: "other"}}); err != nil {
+	if err := checkInbound(list, []BridgeConfig{{Name: "other"}}); err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
 }

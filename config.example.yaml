@@ -55,13 +55,14 @@ socket_mode: "0660"
 # management_socket_mode: "0600"
 # management_socket_group: admins
 
-# All bridges this instance serves. Each maps a local Unix socket to a
+# Outbound: the bridges this instance serves (formerly `bridges:`, still
+# accepted with a warning). Each maps a local Unix socket to a
 # host:port reachable over the tailnet. `mode` is optional and defaults
 # to "tcp" (raw byte copy, protocol-agnostic) -- "http" is the other
 # option, which terminates HTTP on the socket and reverse-proxies each
 # request to target instead (see README's "HTTP mode" section for what
 # that buys you over tcp for an HTTP-shaped service).
-bridges:
+outbound:
   - name: my-service
     listen: /run/tsbridge/my-service.sock
     target: [remote-machine:1234]
@@ -84,12 +85,12 @@ bridges:
     # but doesn't create its socket.
     enabled: false
 
-# Ports on this node's tailnet address that forward to the host, the
-# opposite direction of bridges. `mode` is "tcp" (default), "http", "https"
+# Inbound: ports on this node's tailnet address that forward to the host,
+# the opposite direction of outbound. `mode` is "tcp" (default), "http", "https"
 # or "udp"; `target` is a host:port (IP literal or localhost) or, for
 # anything but udp, a Unix socket path. Access is controlled by your
-# tailnet ACLs. See README.md's "Exposing host services" section.
-# expose:
+# tailnet ACLs. See README.md's "Inbound" section.
+# inbound:
 #   - name: web
 #     port: 8080
 #     target: 127.0.0.1:3000

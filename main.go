@@ -63,8 +63,8 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("config error: %w", err)
 	}
-	if len(cfg.Bridges) == 0 && len(cfg.Expose) == 0 {
-		log.Println("warning: no bridges or expose entries configured, nothing to do")
+	if len(cfg.Bridges) == 0 && len(cfg.Inbound) == 0 {
+		log.Println("warning: no outbound or inbound entries configured, nothing to do")
 	}
 
 	// TS_AUTHKEY is optional: pointing tsbridge at a control server (the
@@ -127,24 +127,24 @@ func run() error {
 		return errors.New("no bridges could be started")
 	}
 
-	var exposed []runningBridge
-	// Exposed ports are not optional the way one failing bridge is: with
+	var inbound []runningBridge
+	// Inbound ports are not optional the way one failing bridge is: with
 	// no management API to show a failed one, a port that can't be opened
 	// (typically one already taken) is reported by refusing to start.
 	// Their own accept errors are logged where they happen, so no fatal
 	// channel is needed.
-	if len(cfg.Expose) > 0 {
+	if len(cfg.Inbound) > 0 {
 		tn, err := tailnetListener(srv)
 		if err != nil {
 			return err
 		}
-		for _, e := range cfg.Expose {
-			rb, err := startExpose(ctx, tn, e, nil)
+		for _, e := range cfg.Inbound {
+			rb, err := startInbound(ctx, tn, e, nil)
 			if err != nil {
 				return err
 			}
-			exposed = append(exposed, rb)
-			log.Printf("exposing %s [%s]: tailnet port %d -> %s", e.Name, e.Mode, e.Port, e.Target)
+			inbound = append(inbound, rb)
+			log.Printf("inbound %s [%s]: tailnet port %d -> %s", e.Name, e.Mode, e.Port, e.Target)
 		}
 	}
 
@@ -170,7 +170,7 @@ func run() error {
 	if mgmt != nil {
 		mgmt.Shutdown(shutdownCtx)
 	}
-	for _, rb := range exposed {
+	for _, rb := range inbound {
 		rb.Shutdown(shutdownCtx)
 	}
 	manager.Shutdown(shutdownCtx)
@@ -179,7 +179,7 @@ func run() error {
 	return nil
 }
 
-// tailnetListener adapts the running tsnet node for startExpose.
+// tailnetListener adapts the running tsnet node for startInbound.
 func tailnetListener(srv *tsnet.Server) (tailnetListen, error) {
 	ip4, ip6 := srv.TailscaleIPs()
 	ip := ip4
@@ -187,7 +187,7 @@ func tailnetListener(srv *tsnet.Server) (tailnetListen, error) {
 		ip = ip6
 	}
 	if !ip.IsValid() {
-		return tailnetListen{}, errors.New("expose: node has no tailnet address")
+		return tailnetListen{}, errors.New("inbound: node has no tailnet address")
 	}
 	return tailnetListen{Listen: srv.Listen, ListenPacket: srv.ListenPacket, ListenTLS: srv.ListenTLS, IP: ip}, nil
 }

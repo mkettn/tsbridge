@@ -14,11 +14,11 @@ import (
 	"time"
 )
 
-// ExposeConfig is one tailnet-port -> local-address mapping, the schema of
-// an entry in config.yaml's expose: list. It is the opposite direction of a
+// InboundConfig is one tailnet-port -> local-address mapping, the schema of
+// an entry in config.yaml's inbound: list. It is the opposite direction of a
 // bridge: traffic reaching this node's tailnet address on Port is forwarded
 // to Target on the host.
-type ExposeConfig struct {
+type InboundConfig struct {
 	Name string `yaml:"name"`
 	// Port is the port on this node's tailnet address to accept on. Who
 	// on the tailnet may reach it is up to the tailnet's ACLs.
@@ -40,9 +40,9 @@ type ExposeConfig struct {
 	TLSKey  string `yaml:"tls_key,omitempty"`
 }
 
-var supportedExposeModes = map[string]bool{"tcp": true, "http": true, "https": true, "udp": true}
+var supportedInboundModes = map[string]bool{"tcp": true, "http": true, "https": true, "udp": true}
 
-func normalizeExpose(e *ExposeConfig) {
+func normalizeInbound(e *InboundConfig) {
 	e.Mode = strings.ToLower(strings.TrimSpace(e.Mode))
 	if e.Mode == "" {
 		e.Mode = defaultBridgeMode
@@ -50,59 +50,59 @@ func normalizeExpose(e *ExposeConfig) {
 	e.Target = strings.TrimSpace(e.Target)
 }
 
-func validateExposeFields(e ExposeConfig) error {
+func validateInboundFields(e InboundConfig) error {
 	if e.Name == "" {
-		return fmt.Errorf("an expose entry is missing required field 'name'")
+		return fmt.Errorf("an inbound entry is missing required field 'name'")
 	}
 	if !validBridgeName(e.Name) {
-		return fmt.Errorf("expose name %q is invalid: use only letters, digits, '_', '.' and '-' (and not just dots)", e.Name)
+		return fmt.Errorf("inbound name %q is invalid: use only letters, digits, '_', '.' and '-' (and not just dots)", e.Name)
 	}
 	if e.Port < 1 || e.Port > 65535 {
-		return fmt.Errorf("expose %q: port must be between 1 and 65535", e.Name)
+		return fmt.Errorf("inbound %q: port must be between 1 and 65535", e.Name)
 	}
-	if !supportedExposeModes[e.Mode] {
-		return fmt.Errorf("expose %q has unsupported mode %q; supported modes are tcp, http, https, udp", e.Name, e.Mode)
+	if !supportedInboundModes[e.Mode] {
+		return fmt.Errorf("inbound %q has unsupported mode %q; supported modes are tcp, http, https, udp", e.Name, e.Mode)
 	}
 	if e.Target == "" {
-		return fmt.Errorf("expose %q is missing required field 'target'", e.Name)
+		return fmt.Errorf("inbound %q is missing required field 'target'", e.Name)
 	}
 	if network, addr := parseEndpoint(e.Mode, e.Target); network != "unix" {
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil || host == "" || port == "" {
-			return fmt.Errorf("expose %q: target %q must be host:port (e.g. 127.0.0.1:8080; IPv6 needs brackets: [::1]:8080)", e.Name, e.Target)
+			return fmt.Errorf("inbound %q: target %q must be host:port (e.g. 127.0.0.1:8080; IPv6 needs brackets: [::1]:8080)", e.Name, e.Target)
 		}
 		if n, err := strconv.ParseUint(port, 10, 16); err != nil || n == 0 {
-			return fmt.Errorf("expose %q: target %q has an invalid port", e.Name, e.Target)
+			return fmt.Errorf("inbound %q: target %q has an invalid port", e.Name, e.Target)
 		}
 		if !isBindHost(host) {
-			return fmt.Errorf("expose %q: target %q must be an IP literal or localhost, then a port (e.g. 127.0.0.1:%s)", e.Name, e.Target, port)
+			return fmt.Errorf("inbound %q: target %q must be an IP literal or localhost, then a port (e.g. 127.0.0.1:%s)", e.Name, e.Target, port)
 		}
 	}
 	if e.Mode != "https" && (e.TLSCert != "" || e.TLSKey != "") {
-		return fmt.Errorf("expose %q sets tls_cert/tls_key, but those only apply to mode: https (entry is mode: %s)", e.Name, e.Mode)
+		return fmt.Errorf("inbound %q sets tls_cert/tls_key, but those only apply to mode: https (entry is mode: %s)", e.Name, e.Mode)
 	}
 	if (e.TLSCert == "") != (e.TLSKey == "") {
-		return fmt.Errorf("expose %q: tls_cert and tls_key must be set together", e.Name)
+		return fmt.Errorf("inbound %q: tls_cert and tls_key must be set together", e.Name)
 	}
 	return nil
 }
 
-// checkExpose validates each entry and rejects duplicate names -- among
+// checkInbound validates each entry and rejects duplicate names -- among
 // the entries and against the bridges, since both are logged under their
 // name -- or two entries claiming the same port on the same protocol.
 // tcp, http and https all bind a TCP port; udp is a separate port space.
-func checkExpose(list []ExposeConfig, bridges []BridgeConfig) error {
+func checkInbound(list []InboundConfig, bridges []BridgeConfig) error {
 	names := map[string]bool{}
 	for _, b := range bridges {
 		names[b.Name] = true
 	}
 	ports := map[string]bool{}
 	for _, e := range list {
-		if err := validateExposeFields(e); err != nil {
+		if err := validateInboundFields(e); err != nil {
 			return err
 		}
 		if names[e.Name] {
-			return fmt.Errorf("duplicate name %q: expose entries and bridges share one namespace", e.Name)
+			return fmt.Errorf("duplicate name %q: inbound and outbound entries share one namespace", e.Name)
 		}
 		names[e.Name] = true
 		proto := "tcp"
@@ -111,14 +111,14 @@ func checkExpose(list []ExposeConfig, bridges []BridgeConfig) error {
 		}
 		key := proto + "!" + strconv.Itoa(e.Port)
 		if ports[key] {
-			return fmt.Errorf("duplicate expose port %d on %s", e.Port, proto)
+			return fmt.Errorf("duplicate inbound port %d on %s", e.Port, proto)
 		}
 		ports[key] = true
 	}
 	return nil
 }
 
-// tailnetListen is what expose needs from the tailnet node: in production
+// tailnetListen is what inbound needs from the tailnet node: in production
 // the methods of a *tsnet.Server, in tests loopback fakes.
 type tailnetListen struct {
 	Listen       func(network, addr string) (net.Listener, error)
@@ -131,7 +131,7 @@ type tailnetListen struct {
 }
 
 // localDialer dials a fixed local address whatever the bridge machinery
-// asks for, so expose can reuse the same tcp/udp relay code as bridges: the
+// asks for, so inbound can reuse the same tcp/udp relay code as outbound: the
 // "target" those pass around is only a label here.
 func localDialer(network, addr string) dialFunc {
 	return func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -140,9 +140,9 @@ func localDialer(network, addr string) dialFunc {
 	}
 }
 
-// startExpose accepts on the tailnet port and relays each connection (tcp)
+// startInbound accepts on the tailnet port and relays each connection (tcp)
 // or client session (udp) to the local target, until Shutdown.
-func startExpose(ctx context.Context, tn tailnetListen, e ExposeConfig, fatal chan<- error) (runningBridge, error) {
+func startInbound(ctx context.Context, tn tailnetListen, e InboundConfig, fatal chan<- error) (runningBridge, error) {
 	network, addr := parseEndpoint(e.Mode, e.Target)
 	dial := localDialer(network, addr)
 	// The relay code logs b.Listen as the source and dials b.Targets.
@@ -157,11 +157,11 @@ func startExpose(ctx context.Context, tn tailnetListen, e ExposeConfig, fatal ch
 	switch e.Mode {
 	case "udp":
 		if !tn.IP.IsValid() {
-			return nil, fmt.Errorf("expose %s: node has no tailnet address to listen on", e.Name)
+			return nil, fmt.Errorf("inbound %s: node has no tailnet address to listen on", e.Name)
 		}
 		pc, err := tn.ListenPacket("udp", netip.AddrPortFrom(tn.IP, uint16(e.Port)).String())
 		if err != nil {
-			return nil, fmt.Errorf("expose %s: listening on tailnet udp %d: %w", e.Name, e.Port, err)
+			return nil, fmt.Errorf("inbound %s: listening on tailnet udp %d: %w", e.Name, e.Port, err)
 		}
 		return serveUDP(ctx, dial, b, pc, udpSessionIdleTimeout, fatal), nil
 	}
@@ -172,7 +172,7 @@ func startExpose(ctx context.Context, tn tailnetListen, e ExposeConfig, fatal ch
 	case e.Mode == "https" && e.TLSCert != "":
 		cr, cerr := newCertReloader(e.TLSCert, e.TLSKey)
 		if cerr != nil {
-			return nil, fmt.Errorf("expose %s: %w", e.Name, cerr)
+			return nil, fmt.Errorf("inbound %s: %w", e.Name, cerr)
 		}
 		l, err = tn.Listen("tcp", ":"+strconv.Itoa(e.Port))
 		if err == nil {
@@ -184,7 +184,7 @@ func startExpose(ctx context.Context, tn tailnetListen, e ExposeConfig, fatal ch
 		l, err = tn.Listen("tcp", ":"+strconv.Itoa(e.Port))
 	}
 	if err != nil {
-		return nil, fmt.Errorf("expose %s: listening on tailnet tcp %d: %w", e.Name, e.Port, err)
+		return nil, fmt.Errorf("inbound %s: listening on tailnet tcp %d: %w", e.Name, e.Port, err)
 	}
 	if e.Mode == "https" {
 		b.Mode = "http" // TLS is already terminated on l

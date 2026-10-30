@@ -59,7 +59,7 @@ func startUDPBridge(ctx context.Context, dial dialFunc, b BridgeConfig, addr str
 
 // serveUDP relays datagrams arriving on an already-bound pc, for both
 // directions of bridging: a local socket to the tailnet (bridges) and a
-// tailnet port to a local address (expose).
+// tailnet port to a local address (inbound).
 func serveUDP(ctx context.Context, dial dialFunc, b BridgeConfig, pc net.PacketConn, idle time.Duration, fatal chan<- error) runningBridge {
 	ctx, cancel := context.WithCancel(ctx)
 	health := &dialHealth{}
