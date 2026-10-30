@@ -194,10 +194,10 @@ Top-level fields in `config.yaml`:
 | `management_socket` | (unset)    | Unix socket for the read-only status API; unset disables it    |
 | `management_socket_group` | (unset) | Unix group to own the management socket                            |
 | `management_socket_mode` | `"0600"` | Permission bits applied to the management socket                      |
-| `outbound`     | `[]`             | List of `{name, listen, target}` bridge mappings (local socket → tailnet). The old name `bridges` still works, with a warning |
+| `outbound`     | `[]`             | List of `{name, listen, target}` bridge mappings (local socket → tailnet). The old name `bridges` still works, with a warning; setting both is an error |
 | `inbound`      | `[]`             | List of `{name, port, target}` [tailnet-port forwards](#inbound-tailnet-ports-to-the-host) (tailnet → host) |
 
-Each bridge entry:
+Each outbound entry:
 
 ```yaml
 - name: my-service          # unique identifier, used in logs and error messages;
@@ -415,7 +415,8 @@ inbound:
 
 Setting `management_socket:` starts a small JSON/HTTP API on its own
 Unix socket that reports the tailnet connection's state and each
-bridge's health. It is **read-only**: bridges are defined in
+outbound entry's health (inbound ports are not reported). It is
+**read-only**: outbound entries are defined in
 `config.yaml` alone, and are added, changed or removed by editing it and
 restarting `tsbridge`. It's unset (disabled) by default.
 
@@ -433,7 +434,7 @@ management_socket_group: admins    # optional, its own group -- independent of s
 | Method | Path              | Does |
 |--------|-------------------|------|
 | `GET`  | `/status`         | The tailnet connection's own state |
-| `GET`  | `/bridges`        | List every bridge with its health |
+| `GET`  | `/bridges`        | List every outbound entry with its health (inbound ports aren't reported) |
 | `GET`  | `/bridges/{name}` | One bridge's current info |
 
 Any other method or path is rejected (`404`/`405`).

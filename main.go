@@ -63,7 +63,7 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("config error: %w", err)
 	}
-	if len(cfg.Bridges) == 0 && len(cfg.Inbound) == 0 {
+	if len(cfg.Outbound) == 0 && len(cfg.Inbound) == 0 {
 		log.Println("warning: no outbound or inbound entries configured, nothing to do")
 	}
 
@@ -110,7 +110,7 @@ func run() error {
 	}
 
 	manager := newBridgeManager(ctx, srv.Dial, cfg.SocketMode, cfg.SocketGroup, lc.StatusWithoutPeers)
-	started, attempted, err := manager.startAll(cfg.Bridges)
+	started, attempted, err := manager.startAll(cfg.Outbound)
 	if err != nil {
 		return err
 	}

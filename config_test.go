@@ -47,12 +47,12 @@ outbound:
 	if cfg.ControlURL != "https://headscale.example.com" {
 		t.Errorf("want control_url %q, got %q", "https://headscale.example.com", cfg.ControlURL)
 	}
-	if len(cfg.Bridges) != 2 {
-		t.Fatalf("want 2 bridges, got %d: %+v", len(cfg.Bridges), cfg.Bridges)
+	if len(cfg.Outbound) != 2 {
+		t.Fatalf("want 2 bridges, got %d: %+v", len(cfg.Outbound), cfg.Outbound)
 	}
 
 	byName := map[string]BridgeConfig{}
-	for _, b := range cfg.Bridges {
+	for _, b := range cfg.Outbound {
 		byName[b.Name] = b
 	}
 	if byName["svc-a"].Targets[0] != "host-a:1111" {
@@ -97,8 +97,8 @@ outbound:
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if cfg.Bridges[0].Mode != "http" {
-		t.Errorf("want lowercased %q, got %q", "http", cfg.Bridges[0].Mode)
+	if cfg.Outbound[0].Mode != "http" {
+		t.Errorf("want lowercased %q, got %q", "http", cfg.Outbound[0].Mode)
 	}
 }
 
@@ -115,7 +115,7 @@ outbound:
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if cfg.Bridges[0].RewriteHost {
+	if cfg.Outbound[0].RewriteHost {
 		t.Error("want rewrite_host to default to false")
 	}
 }
@@ -134,7 +134,7 @@ outbound:
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if !cfg.Bridges[0].RewriteHost {
+	if !cfg.Outbound[0].RewriteHost {
 		t.Error("want rewrite_host true")
 	}
 }
@@ -179,7 +179,7 @@ outbound:
 	}
 
 	byName := map[string]string{}
-	for _, b := range cfg.Bridges {
+	for _, b := range cfg.Outbound {
 		byName[b.Name] = b.Listen
 	}
 	if want := filepath.Join(dir, "relative.sock"); byName["relative-svc"] != want {
@@ -444,8 +444,8 @@ outbound:
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if cfg.Bridges[0].Enabled == nil || !*cfg.Bridges[0].Enabled {
-		t.Errorf("want enabled to default to true, got %+v", cfg.Bridges[0].Enabled)
+	if cfg.Outbound[0].Enabled == nil || !*cfg.Outbound[0].Enabled {
+		t.Errorf("want enabled to default to true, got %+v", cfg.Outbound[0].Enabled)
 	}
 }
 
@@ -462,8 +462,8 @@ outbound:
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if cfg.Bridges[0].Enabled == nil || *cfg.Bridges[0].Enabled {
-		t.Errorf("want enabled: false preserved, got %+v", cfg.Bridges[0].Enabled)
+	if cfg.Outbound[0].Enabled == nil || *cfg.Outbound[0].Enabled {
+		t.Errorf("want enabled: false preserved, got %+v", cfg.Outbound[0].Enabled)
 	}
 }
 
@@ -486,10 +486,10 @@ outbound:
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if a := cfg.Bridges[0]; a.SocketGroup != "admins" || a.SocketMode != "0660" {
+	if a := cfg.Outbound[0]; a.SocketGroup != "admins" || a.SocketMode != "0660" {
 		t.Errorf("bridge a overrides = %q/%q", a.SocketGroup, a.SocketMode)
 	}
-	if b := cfg.Bridges[1]; b.SocketGroup != "" || b.SocketMode != "" {
+	if b := cfg.Outbound[1]; b.SocketGroup != "" || b.SocketMode != "" {
 		t.Errorf("bridge b should inherit, got %q/%q", b.SocketGroup, b.SocketMode)
 	}
 }
@@ -540,8 +540,8 @@ bridges:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Bridges) != 1 || cfg.Bridges[0].Name != "svc" {
-		t.Errorf("bridges = %+v", cfg.Bridges)
+	if len(cfg.Outbound) != 1 || cfg.Outbound[0].Name != "svc" {
+		t.Errorf("bridges = %+v", cfg.Outbound)
 	}
 }
 

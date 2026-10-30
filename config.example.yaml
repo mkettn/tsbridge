@@ -56,12 +56,12 @@ socket_mode: "0660"
 # management_socket_group: admins
 
 # Outbound: the bridges this instance serves (formerly `bridges:`, still
-# accepted with a warning). Each maps a local Unix socket to a
-# host:port reachable over the tailnet. `mode` is optional and defaults
-# to "tcp" (raw byte copy, protocol-agnostic) -- "http" is the other
-# option, which terminates HTTP on the socket and reverse-proxies each
-# request to target instead (see README's "HTTP mode" section for what
-# that buys you over tcp for an HTTP-shaped service).
+# accepted with a warning; setting both keys is an error). Each maps a
+# local Unix socket to a host:port reachable over the tailnet. `mode` is
+# optional and defaults to "tcp" (raw byte copy, protocol-agnostic) --
+# "http" is the other option, which terminates HTTP on the socket and
+# reverse-proxies each request to target instead (see README's "HTTP mode"
+# section for what that buys you over tcp for an HTTP-shaped service).
 outbound:
   - name: my-service
     listen: /run/tsbridge/my-service.sock

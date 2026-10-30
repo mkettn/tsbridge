@@ -148,7 +148,7 @@ type Config struct {
 	ManagementSocket      string
 	ManagementSocketGroup string
 	ManagementSocketMode  os.FileMode
-	Bridges               []BridgeConfig
+	Outbound              []BridgeConfig
 	Inbound               []InboundConfig
 }
 
@@ -275,7 +275,7 @@ func LoadConfig(path string) (*Config, error) {
 		ManagementSocket:      managementSocket,
 		ManagementSocketGroup: raw.ManagementSocketGroup,
 		ManagementSocketMode:  managementMode,
-		Bridges:               bridges,
+		Outbound:              bridges,
 		Inbound:               inbound,
 	}, nil
 }
