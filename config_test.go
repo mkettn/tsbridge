@@ -26,7 +26,7 @@ ephemeral: true
 control_url: https://headscale.example.com
 socket_group: www-data
 socket_mode: "0640"
-bridges:
+outbound:
   - name: svc-a
     listen: /run/tsbridge/svc-a.sock
     target: host-a:1111
@@ -47,12 +47,12 @@ bridges:
 	if cfg.ControlURL != "https://headscale.example.com" {
 		t.Errorf("want control_url %q, got %q", "https://headscale.example.com", cfg.ControlURL)
 	}
-	if len(cfg.Bridges) != 2 {
-		t.Fatalf("want 2 bridges, got %d: %+v", len(cfg.Bridges), cfg.Bridges)
+	if len(cfg.Outbound) != 2 {
+		t.Fatalf("want 2 bridges, got %d: %+v", len(cfg.Outbound), cfg.Outbound)
 	}
 
 	byName := map[string]BridgeConfig{}
-	for _, b := range cfg.Bridges {
+	for _, b := range cfg.Outbound {
 		byName[b.Name] = b
 	}
 	if byName["svc-a"].Targets[0] != "host-a:1111" {
@@ -72,7 +72,7 @@ bridges:
 func TestLoadConfig_UnsupportedBridgeModeRejected(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), `
-bridges:
+outbound:
   - name: svc
     listen: /run/svc.sock
     target: h:1
@@ -87,7 +87,7 @@ bridges:
 func TestLoadConfig_HTTPModeAccepted(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), `
-bridges:
+outbound:
   - name: svc
     listen: /run/svc.sock
     target: h:1
@@ -97,15 +97,15 @@ bridges:
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if cfg.Bridges[0].Mode != "http" {
-		t.Errorf("want lowercased %q, got %q", "http", cfg.Bridges[0].Mode)
+	if cfg.Outbound[0].Mode != "http" {
+		t.Errorf("want lowercased %q, got %q", "http", cfg.Outbound[0].Mode)
 	}
 }
 
 func TestLoadConfig_RewriteHostDefaultsToFalse(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), `
-bridges:
+outbound:
   - name: svc
     listen: /run/svc.sock
     target: h:1
@@ -115,7 +115,7 @@ bridges:
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if cfg.Bridges[0].RewriteHost {
+	if cfg.Outbound[0].RewriteHost {
 		t.Error("want rewrite_host to default to false")
 	}
 }
@@ -123,7 +123,7 @@ bridges:
 func TestLoadConfig_RewriteHostAcceptedOnHTTPMode(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), `
-bridges:
+outbound:
   - name: svc
     listen: /run/svc.sock
     target: h:1
@@ -134,7 +134,7 @@ bridges:
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if !cfg.Bridges[0].RewriteHost {
+	if !cfg.Outbound[0].RewriteHost {
 		t.Error("want rewrite_host true")
 	}
 }
@@ -142,7 +142,7 @@ bridges:
 func TestLoadConfig_RewriteHostRejectedOnTCPMode(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), `
-bridges:
+outbound:
   - name: svc
     listen: /run/svc.sock
     target: h:1
@@ -159,7 +159,7 @@ func TestLoadConfig_RelativePathsResolveAgainstConfigDir(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), `
 state_dir: state
-bridges:
+outbound:
   - name: relative-svc
     listen: relative.sock
     target: h:1
@@ -179,7 +179,7 @@ bridges:
 	}
 
 	byName := map[string]string{}
-	for _, b := range cfg.Bridges {
+	for _, b := range cfg.Outbound {
 		byName[b.Name] = b.Listen
 	}
 	if want := filepath.Join(dir, "relative.sock"); byName["relative-svc"] != want {
@@ -193,7 +193,7 @@ bridges:
 func TestLoadConfig_DuplicateName(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), `
-bridges:
+outbound:
   - name: dup
     listen: /run/a.sock
     target: h:1
@@ -210,7 +210,7 @@ bridges:
 func TestLoadConfig_DuplicateListen(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), `
-bridges:
+outbound:
   - name: a
     listen: /run/shared.sock
     target: h:1
@@ -227,7 +227,7 @@ bridges:
 func TestLoadConfig_MissingRequiredFields(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), `
-bridges:
+outbound:
   - name: no-target
     listen: /run/a.sock
 `)
@@ -240,7 +240,7 @@ bridges:
 func TestLoadConfig_MalformedYAMLIsFatal(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), `
-bridges: [this is not valid: yaml: [[[
+outbound: [this is not valid: yaml: [[[
 `)
 	_, err := LoadConfig(filepath.Join(dir, "config.yaml"))
 	if err == nil {
@@ -251,7 +251,7 @@ bridges: [this is not valid: yaml: [[[
 func TestLoadConfig_UnknownTopLevelFieldRejected(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), `
-bridges: []
+outbound: []
 totally_unknown_field: true
 `)
 	_, err := LoadConfig(filepath.Join(dir, "config.yaml"))
@@ -264,7 +264,7 @@ func TestLoadConfig_ControlURLRejectsNonHTTPS(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), `
 control_url: http://headscale.example.com
-bridges: []
+outbound: []
 `)
 	_, err := LoadConfig(filepath.Join(dir, "config.yaml"))
 	if err == nil || !strings.Contains(err.Error(), "https") {
@@ -276,7 +276,7 @@ func TestLoadConfig_ControlURLRejectsMalformed(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), `
 control_url: "headscale.example.com"
-bridges: []
+outbound: []
 `)
 	_, err := LoadConfig(filepath.Join(dir, "config.yaml"))
 	if err == nil || !strings.Contains(err.Error(), "control_url") {
@@ -287,7 +287,7 @@ bridges: []
 func TestLoadConfig_ControlURLDefaultsToEmpty(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), `
-bridges: []
+outbound: []
 `)
 	cfg, err := LoadConfig(filepath.Join(dir, "config.yaml"))
 	if err != nil {
@@ -301,7 +301,7 @@ bridges: []
 func TestLoadConfig_DefaultsWhenUnset(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), `
-bridges: []
+outbound: []
 `)
 	cfg, err := LoadConfig(filepath.Join(dir, "config.yaml"))
 	if err != nil {
@@ -326,7 +326,7 @@ func TestLoadConfig_ManagementSocketDefaultsAndResolvesPath(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "config.yaml"), `
 state_dir: state
 management_socket: control.sock
-bridges: []
+outbound: []
 `)
 	cfg, err := LoadConfig(filepath.Join(dir, "config.yaml"))
 	if err != nil {
@@ -347,7 +347,7 @@ state_dir: state
 management_socket: control.sock
 management_socket_mode: "0640"
 management_socket_group: admins
-bridges: []
+outbound: []
 `)
 	cfg, err := LoadConfig(filepath.Join(dir, "config.yaml"))
 	if err != nil {
@@ -366,7 +366,7 @@ func TestLoadConfig_ManagementSocketNeedsNoStateDir(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "config.yaml"), `
 ephemeral: true
 management_socket: control.sock
-bridges: []
+outbound: []
 `)
 	if _, err := LoadConfig(filepath.Join(dir, "config.yaml")); err != nil {
 		t.Fatalf("the read-only management socket should not need state_dir: %v", err)
@@ -378,7 +378,7 @@ func TestLoadConfig_ManagementSocketCollidesWithBridgeListen(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "config.yaml"), `
 state_dir: state
 management_socket: /run/tsbridge/shared.sock
-bridges:
+outbound:
   - name: svc
     listen: /run/tsbridge/shared.sock
     target: host:1
@@ -393,7 +393,7 @@ func TestLoadConfig_ManagementSocketModeWithoutSocketRejected(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), `
 management_socket_mode: "0640"
-bridges: []
+outbound: []
 `)
 	_, err := LoadConfig(filepath.Join(dir, "config.yaml"))
 	if err == nil || !strings.Contains(err.Error(), "management_socket_mode") {
@@ -405,7 +405,7 @@ func TestLoadConfig_ManagementSocketGroupWithoutSocketRejected(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), `
 management_socket_group: admins
-bridges: []
+outbound: []
 `)
 	_, err := LoadConfig(filepath.Join(dir, "config.yaml"))
 	if err == nil || !strings.Contains(err.Error(), "management_socket_group") {
@@ -424,7 +424,7 @@ func TestLoadConfig_ManagementSocketGroupWithoutModeRejected(t *testing.T) {
 state_dir: state
 management_socket: control.sock
 management_socket_group: admins
-bridges: []
+outbound: []
 `)
 	_, err := LoadConfig(filepath.Join(dir, "config.yaml"))
 	if err == nil || !strings.Contains(err.Error(), "management_socket_mode") {
@@ -435,7 +435,7 @@ bridges: []
 func TestLoadConfig_BridgeEnabledDefaultsToTrue(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), `
-bridges:
+outbound:
   - name: svc
     listen: /run/svc.sock
     target: host:1
@@ -444,15 +444,15 @@ bridges:
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if cfg.Bridges[0].Enabled == nil || !*cfg.Bridges[0].Enabled {
-		t.Errorf("want enabled to default to true, got %+v", cfg.Bridges[0].Enabled)
+	if cfg.Outbound[0].Enabled == nil || !*cfg.Outbound[0].Enabled {
+		t.Errorf("want enabled to default to true, got %+v", cfg.Outbound[0].Enabled)
 	}
 }
 
 func TestLoadConfig_BridgeEnabledFalseAccepted(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), `
-bridges:
+outbound:
   - name: svc
     listen: /run/svc.sock
     target: host:1
@@ -462,8 +462,8 @@ bridges:
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if cfg.Bridges[0].Enabled == nil || *cfg.Bridges[0].Enabled {
-		t.Errorf("want enabled: false preserved, got %+v", cfg.Bridges[0].Enabled)
+	if cfg.Outbound[0].Enabled == nil || *cfg.Outbound[0].Enabled {
+		t.Errorf("want enabled: false preserved, got %+v", cfg.Outbound[0].Enabled)
 	}
 }
 
@@ -472,7 +472,7 @@ func TestLoadConfig_PerBridgeSocketOverrides(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "config.yaml"), `
 socket_group: web
 socket_mode: "0660"
-bridges:
+outbound:
   - name: a
     listen: /run/a.sock
     target: h:1
@@ -486,10 +486,10 @@ bridges:
 	if err != nil {
 		t.Fatalf("LoadConfig: %v", err)
 	}
-	if a := cfg.Bridges[0]; a.SocketGroup != "admins" || a.SocketMode != "0660" {
+	if a := cfg.Outbound[0]; a.SocketGroup != "admins" || a.SocketMode != "0660" {
 		t.Errorf("bridge a overrides = %q/%q", a.SocketGroup, a.SocketMode)
 	}
-	if b := cfg.Bridges[1]; b.SocketGroup != "" || b.SocketMode != "" {
+	if b := cfg.Outbound[1]; b.SocketGroup != "" || b.SocketMode != "" {
 		t.Errorf("bridge b should inherit, got %q/%q", b.SocketGroup, b.SocketMode)
 	}
 }
@@ -497,7 +497,7 @@ bridges:
 func TestLoadConfig_PerBridgeSocketModeInvalid(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "config.yaml"), `
-bridges:
+outbound:
   - name: a
     listen: /run/a.sock
     target: h:1
@@ -515,7 +515,7 @@ func TestLoadConfig_PerBridgeGroupWithoutGroupWriteRejected(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			dir := t.TempDir()
 			writeFile(t, filepath.Join(dir, "config.yaml"), `
-bridges:
+outbound:
   - name: a
     listen: /run/a.sock
     target: h:1
@@ -527,4 +527,41 @@ bridges:
 			}
 		})
 	}
+}
+
+func TestLoadConfig_LegacyBridgesKey(t *testing.T) {
+	path := writeTempConfig(t, `
+bridges:
+  - name: svc
+    listen: /tmp/svc.sock
+    target: [host:1]
+`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Outbound) != 1 || cfg.Outbound[0].Name != "svc" {
+		t.Errorf("bridges = %+v", cfg.Outbound)
+	}
+}
+
+func TestLoadConfig_BridgesAndOutboundTogether(t *testing.T) {
+	path := writeTempConfig(t, `
+bridges: []
+outbound:
+  - name: svc
+    listen: /tmp/svc.sock
+    target: [host:1]
+`)
+	_, err := LoadConfig(path)
+	if err == nil || !strings.Contains(err.Error(), "old name of 'outbound'") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+func writeTempConfig(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	writeFile(t, path, content)
+	return path
 }

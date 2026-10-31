@@ -11,9 +11,15 @@ Typical use: a reverse proxy or app server on a box that shouldn't be a
 full tailnet member connects to `/run/tsbridge/my-service.sock` instead of
 directly to `remote-machine:1234` on the tailnet.
 
+That is the **outbound** direction (`outbound:`, formerly `bridges:`). The
+**inbound** direction (`inbound:`) works the other way round: it accepts
+traffic on a port of this node's tailnet address and forwards it to a Unix
+socket or a TCP/UDP port on the host (see
+[Inbound](#inbound-tailnet-ports-to-the-host)).
+
 ## Contents
 
-- `main.go`, `config.go`, `bridge.go`, `manage.go` — the `tsbridge` binary
+- `main.go`, `config.go`, `bridge.go`, `inbound.go`, `manage.go` — the `tsbridge` binary
 - `config.example.yaml` — annotated example config
 - `tsbridge.service` — systemd unit
 - `tsbridge-sysusers.conf` — `systemd-sysusers` snippet for the service user
@@ -136,7 +142,7 @@ a typo surface later as an opaque `srv.Up` failure. `https` is required,
 not just the default, since this is the server the node registers with
 and trusts for policy; there's no config-only way to opt into plaintext.
 
-Everything else — registration (see above), the `bridges:` mechanism, the
+Everything else — registration (see above), the `outbound:` mechanism, the
 Unix sockets, the systemd unit — works identically; `tsbridge` doesn't
 know or care which control server it's registered with beyond this one
 URL. Leave `control_url` unset (the default) to use Tailscale's own
@@ -185,12 +191,13 @@ Top-level fields in `config.yaml`:
 | `control_url`  | (Tailscale)      | Control server to register with; set for a self-hosted Headscale        |
 | `socket_group` | (unset)          | Unix group to own every bridge socket                                   |
 | `socket_mode`  | `"0660"`         | Permission bits applied to every bridge socket                          |
-| `management_socket` | (unset)    | Unix socket for the runtime bridge-management API; unset disables it    |
+| `management_socket` | (unset)    | Unix socket for the read-only status API; unset disables it    |
 | `management_socket_group` | (unset) | Unix group to own the management socket                            |
 | `management_socket_mode` | `"0600"` | Permission bits applied to the management socket                      |
-| `bridges`      | `[]`             | List of `{name, listen, target}` bridge mappings                        |
+| `outbound`     | `[]`             | List of `{name, listen, target}` bridge mappings (local socket → tailnet). The old name `bridges` still works, with a warning; setting both is an error |
+| `inbound`      | `[]`             | List of `{name, port, target}` [tailnet-port forwards](#inbound-tailnet-ports-to-the-host) (tailnet → host) |
 
-Each bridge entry:
+Each outbound entry:
 
 ```yaml
 - name: my-service          # unique identifier, used in logs and error messages;
@@ -267,7 +274,7 @@ so clients that can't use a Unix socket still reach the tailnet target:
   bind loopback (`127.0.0.1`); a non-loopback address is allowed but logs a
   warning at startup.
 
-`bridges:` is a flat list — every service `tsbridge` proxies is one entry
+`outbound:` is a flat list — every service `tsbridge` proxies is one entry
 here, in the one `config.yaml` file. `name` and `listen` must each be
 unique across the list; a duplicate of either is a fatal startup error
 naming the conflict. Adding, removing, or changing a bridge here means
@@ -347,13 +354,71 @@ directory. This is mostly useful for self-contained setups (see
 they don't depend on the config file's location matching
 `RuntimeDirectory=`/`StateDirectory=` by coincidence.
 
+## Inbound: tailnet ports to the host
+
+`outbound:` carries local clients *to* the tailnet. `inbound:` goes the other
+way: traffic that reaches this node's tailnet address on a port is forwarded
+to a socket or port on the host.
+
+```yaml
+inbound:
+  - name: web
+    port: 8080                      # port on this node's tailnet address
+    target: 127.0.0.1:3000          # a TCP port on the host ...
+  - name: app
+    port: 9000
+    target: /run/app/app.sock       # ... or a Unix socket
+  - name: dns
+    port: 53
+    mode: udp
+    target: 127.0.0.1:5353
+```
+
+| Field    | Meaning |
+|----------|---------|
+| `name`   | Unique identifier, same character rules as a bridge name. |
+| `port`   | 1-65535. The port is taken on the node's own tailnet address. |
+| `mode`   | `tcp` (default), `http`, `https` or `udp`. |
+| `tls_cert`, `tls_key` | `mode: https` only, both or neither: PEM files for the certificate to serve (relative paths resolve against the config directory). Omit both to use a certificate provisioned by the tailnet. |
+| `target` | Where the traffic goes on the host. Written like a bridge's `listen:`: an IP literal or `localhost` plus a port, otherwise a Unix socket path (relative paths resolve against the config file's directory). `mode: udp` needs a `host:port`. |
+
+- **Who can connect** is decided by your tailnet's ACLs; tsbridge adds no
+  access control of its own. Anything that can reach the port reaches the
+  target, so prefer loopback targets and narrow the ACL to the peers that
+  need it.
+- `http` reverse-proxies each request to the target (a host port or a Unix
+  socket) instead of copying bytes; the target sees the tailnet peer's
+  address in `X-Forwarded-For` and the scheme in `X-Forwarded-Proto` (set
+  by tsbridge; a client-sent `X-Forwarded-Proto`, `Forwarded` or
+  `X-Forwarded-Host` is dropped), and the client's `Host` header passes through
+  unchanged. The tailnet port is plain HTTP; WireGuard already encrypts the
+  tailnet leg.
+- `https` is `http` with TLS terminated on the tailnet port (requests still
+  reach the target as plain HTTP, with `X-Forwarded-Proto: https`). With `tls_cert`/`tls_key` it serves your
+  certificate and re-reads the files when they change, so a renewal needs no
+  restart; if a replacement fails to load, the previous certificate stays in
+  service and the error is logged. Without them, tsbridge asks the tailnet
+  for a certificate for this node's name (`tsnet`'s `ListenTLS`): that needs
+  HTTPS certificates enabled for a Tailscale tailnet and is not available on
+  Headscale, where you supply the files.
+- `tcp` copies bytes both ways (one tailnet connection per host connection).
+  `udp` relays datagrams, with one host-side socket per tailnet client that
+  idles out after 60 seconds, as for UDP bridges. UDP listens on the node's
+  IPv4 tailnet address (IPv6 if it has none).
+- Target hostnames are not resolved: `example.com:80` would be read as a
+  Unix socket path. Use an IP literal or `localhost`.
+- A port that cannot be opened (for example one already in use) stops
+  tsbridge at startup. Inbound ports are not shown by the management API.
+- There is one target per entry (no round robin).
+
 ## Management API (read-only)
 
-Setting `management_socket:` starts a small JSON/HTTP API on its own
-Unix socket that reports the tailnet connection's state and each
-bridge's health. It is **read-only**: bridges are defined in
-`config.yaml` alone, and are added, changed or removed by editing it and
-restarting `tsbridge`. It's unset (disabled) by default.
+Setting `management_socket:` starts a small JSON/HTTP API on its own Unix
+socket that reports the tailnet connection's state and each outbound
+entry's health (inbound ports are not reported). It is **read-only**:
+outbound entries are defined in `config.yaml` alone, and are added,
+changed or removed by editing it and restarting `tsbridge`. It's unset
+(disabled) by default.
 
 ```yaml
 management_socket: /run/tsbridge/control.sock
@@ -369,8 +434,8 @@ management_socket_group: admins    # optional, its own group -- independent of s
 | Method | Path              | Does |
 |--------|-------------------|------|
 | `GET`  | `/status`         | The tailnet connection's own state |
-| `GET`  | `/bridges`        | List every bridge with its health |
-| `GET`  | `/bridges/{name}` | One bridge's current info |
+| `GET`  | `/bridges`        | List every outbound entry with its health (inbound ports aren't reported) |
+| `GET`  | `/bridges/{name}` | One outbound entry's current info |
 
 Any other method or path is rejected (`404`/`405`).
 
@@ -565,8 +630,25 @@ definitions and destinations for your setup:
 }
 ```
 
-Adjust `dst` to match every `target:` in your `bridges:` list, and nothing
+Adjust `dst` to match every `target:` in your `outbound:` list, and nothing
 more.
+
+If you use [`inbound:`](#inbound-tailnet-ports-to-the-host), the node
+also needs **inbound** rules: ACLs are the only access control on inbound
+ports, and without a rule nothing on the tailnet can connect to them. Add
+one per group of peers, listing exactly the inbound ports:
+
+```jsonc
+// Who may reach the ports tsbridge serves inbound.
+{
+  "action": "accept",
+  "src": ["group:devs"],
+  "dst": ["tag:tsbridge:8080", "tag:tsbridge:443"],
+},
+```
+
+So `dst` in the outbound rule covers every `target:` in `outbound:`, and the
+inbound rule covers every `port:` in `inbound:`, and nothing more.
 
 ## Signal handling / shutdown
 
@@ -647,7 +729,7 @@ to exercise `srv.Dial` without it.
    cat > /tmp/tsbridge-test/config.yaml <<'EOF'
    hostname: tsbridge-manual-test
    ephemeral: true
-   bridges:
+   outbound:
      - name: echo-test
        listen: /tmp/tsbridge-test/run/echo-test.sock
        target: [echo-host:9999]
@@ -763,7 +845,8 @@ path "..."`) rather than failing partway through startup.
   fail-fast at startup; restart `tsbridge` to pick up a `config.yaml`
   edit. The management API is read-only.
 - No protocol awareness in `tcp` mode (the default) — it copies raw TCP
-  bytes in both directions. `mode: http` is the one deliberate exception
-  (see [HTTP mode](#http-mode-reverse-proxy)); anything else
-  protocol-specific (TLS termination, gRPC, etc.) still belongs in
-  whatever connects to the Unix socket, not here.
+  bytes in both directions. `mode: http` (see
+  [HTTP mode](#http-mode-reverse-proxy)) and, for `inbound:`, `mode: https`
+  (TLS termination) are the deliberate exceptions; anything else
+  protocol-specific (gRPC routing, etc.) still belongs in whatever
+  connects to the socket, not here.

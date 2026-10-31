@@ -493,6 +493,18 @@ func startHTTPBridge(ctx context.Context, dial dialFunc, b BridgeConfig, l net.L
 		if b.RewriteHost {
 			r.Host = target
 		}
+		if b.forwardProto {
+			// Set here and never passed through: a client must not be able
+			// to claim a scheme or host it didn't use. The Host header
+			// itself still reaches the backend unchanged.
+			proto := "http"
+			if r.TLS != nil {
+				proto = "https"
+			}
+			r.Header.Set("X-Forwarded-Proto", proto)
+			r.Header.Del("Forwarded")
+			r.Header.Del("X-Forwarded-Host")
+		}
 	}
 	proxy.Transport = &http.Transport{
 		DialContext: func(dialCtx context.Context, network, addr string) (net.Conn, error) {

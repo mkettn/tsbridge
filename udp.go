@@ -54,7 +54,13 @@ func startUDPBridge(ctx context.Context, dial dialFunc, b BridgeConfig, addr str
 		return nil, fmt.Errorf("listening on udp %s: %w", addr, err)
 	}
 	warnIfNonLoopback(b.Name, pc.LocalAddr())
+	return serveUDP(ctx, dial, b, pc, idle, fatal), nil
+}
 
+// serveUDP relays datagrams arriving on an already-bound pc, for both
+// directions of bridging: a local socket to the tailnet (bridges) and a
+// tailnet port to a local address (inbound).
+func serveUDP(ctx context.Context, dial dialFunc, b BridgeConfig, pc net.PacketConn, idle time.Duration, fatal chan<- error) runningBridge {
 	ctx, cancel := context.WithCancel(ctx)
 	health := &dialHealth{}
 	u := &udpBridge{
@@ -67,7 +73,7 @@ func startUDPBridge(ctx context.Context, dial dialFunc, b BridgeConfig, addr str
 		defer u.wg.Done()
 		u.readLoop(fatal)
 	}()
-	return u, nil
+	return u
 }
 
 func (u *udpBridge) readLoop(fatal chan<- error) {
