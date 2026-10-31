@@ -413,12 +413,12 @@ inbound:
 
 ## Management API (read-only)
 
-Setting `management_socket:` starts a small JSON/HTTP API on its own
-Unix socket that reports the tailnet connection's state and each
-outbound entry's health (inbound ports are not reported). It is
-**read-only**: outbound entries are defined in
-`config.yaml` alone, and are added, changed or removed by editing it and
-restarting `tsbridge`. It's unset (disabled) by default.
+Setting `management_socket:` starts a small JSON/HTTP API on its own Unix
+socket that reports the tailnet connection's state and each outbound
+entry's health (inbound ports are not reported). It is **read-only**:
+outbound entries are defined in `config.yaml` alone, and are added,
+changed or removed by editing it and restarting `tsbridge`. It's unset
+(disabled) by default.
 
 ```yaml
 management_socket: /run/tsbridge/control.sock
@@ -435,7 +435,7 @@ management_socket_group: admins    # optional, its own group -- independent of s
 |--------|-------------------|------|
 | `GET`  | `/status`         | The tailnet connection's own state |
 | `GET`  | `/bridges`        | List every outbound entry with its health (inbound ports aren't reported) |
-| `GET`  | `/bridges/{name}` | One bridge's current info |
+| `GET`  | `/bridges/{name}` | One outbound entry's current info |
 
 Any other method or path is rejected (`404`/`405`).
 
